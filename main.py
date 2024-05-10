@@ -32,16 +32,10 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
     :return: info_list
     """
     log.info("Crawl the plate " + str(fid) + " page number " + str(page))
-    url = "https://{}/".format(domain)
+    url = "https://{}/forum-{}-{}.html".format(domain, fid, page)
     # headers
     headers = {
         "cookie": cookie,
-    }
-    # 参数
-    params = {
-        "mod": "forumdisplay",
-        "fid": fid,
-        "page": page,
     }
 
     # 存放字典的列表
@@ -49,7 +43,7 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
     tid_list = []
 
     async with httpx.AsyncClient(proxies=proxy) as client:
-        response = await client.get(url, params=params, headers=headers)
+        response = await client.get(url, headers=headers)
     # 使用bs4解析
     soup = bs4.BeautifulSoup(response.text, "html.parser")
     # print(soup)
