@@ -1,5 +1,8 @@
 # 色花堂BT区页面爬取脚本
 
+cloudflare challenge 难以绕过，停止开发
+
+---
 v2 版本使用说明
 - 增加了tgbot远程控制功能（`bot.py` 需要保持后台运行，具体效果可参考：[tgbot](effect%20picture/tgbot)）
   - 需要在 `tgbot/models/users_model.py` 中设置管理员的id
