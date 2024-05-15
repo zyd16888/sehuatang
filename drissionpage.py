@@ -9,6 +9,7 @@ def get_user_agent_and_cookies():
 
     chromium_options = ChromiumOptions()
     if proxy_enable:
+        log.debug("proxy enable url is :", proxy_url)
         chromium_options.set_proxy(proxy_url)
     # print("user_agent:", user_agent)
     chromium_options.headless()
