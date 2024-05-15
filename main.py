@@ -4,6 +4,7 @@ import bs4
 import re
 import time
 
+from drissionpage import get_user_agent_and_cookies
 from util.mongo import save_data, compare_tid, filter_data
 from util.log_util import log
 from util.save_to_mysql import SaveToMysql
@@ -20,6 +21,8 @@ from util.config import (
     proxy,
 )
 
+user_agent = ""
+page_cookies = {}
 
 # 获取帖子的id(访问板块)
 async def get_plate_info(fid: int, page: int, proxy: str, date_time):
@@ -35,7 +38,7 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
     url = "https://{}/forum-{}-{}.html".format(domain, fid, page)
     # headers
     headers = {
-        "cookie": cookie,
+        "User-Agent": user_agent
     }
 
     # 存放字典的列表
@@ -43,7 +46,7 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
     tid_list = []
 
     async with httpx.AsyncClient(proxies=proxy) as client:
-        response = await client.get(url, headers=headers)
+        response = await client.get(url, headers=headers, cookies=page_cookies)
     # 使用bs4解析
     soup = bs4.BeautifulSoup(response.text, "html.parser")
     # print(soup)
@@ -96,12 +99,12 @@ async def get_page(tid, proxy, f_info):
     url = "https://{}/?mod=viewthread&tid={}".format(domain, tid)
     # headers
     headers = {
-        "cookie": cookie,
+        "User-Agent": user_agent
     }
 
     try:
         async with httpx.AsyncClient(proxies=proxy) as client:
-            response = await client.get(url, headers=headers)
+            response = await client.get(url, headers=headers, cookies=page_cookies)
 
         soup = bs4.BeautifulSoup(response.text, "html.parser")
         # 获取帖子的标题
@@ -213,6 +216,11 @@ async def crawler(fid):
 
 async def main():
     log.debug(f"日期: {date()}")
+
+    global user_agent
+    global page_cookies
+
+    user_agent, page_cookies = get_user_agent_and_cookies()
 
     for fid in fid_list:
         await crawler(fid)
