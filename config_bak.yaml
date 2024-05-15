@@ -38,7 +38,7 @@ sehuatang:
 
 proxy:
   # 代理服务器
-  proxy_host: http://127.0.0.1:11223
+  proxy_url: http://127.0.0.1:11223
   # 是否使用代理
   proxy_enable: true
 
