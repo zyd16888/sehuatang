@@ -45,6 +45,8 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
     info_list = []
     tid_list = []
 
+    log.debug(f"get_plate_info url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
+
     async with httpx.AsyncClient(proxies=proxy) as client:
         response = await client.get(url, headers=headers, cookies=page_cookies)
     # 使用bs4解析
@@ -103,6 +105,7 @@ async def get_page(tid, proxy, f_info):
     }
 
     try:
+        log.debug(f"get_page url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
         async with httpx.AsyncClient(proxies=proxy) as client:
             response = await client.get(url, headers=headers, cookies=page_cookies)
 
