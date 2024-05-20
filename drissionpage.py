@@ -25,15 +25,18 @@ def get_user_agent_and_cookies():
         e.click()
         time.sleep(5)
     time.sleep(3)
+
+    if page.title == domain.upper() :
+        enterdiv = page.ele('.enter-btn')
+        log.debug(enterdiv.html)
+        time.sleep(1)
+        enterdiv.click()
+        time.sleep(3)
+
     user_agent = page._headers.get('User-Agent')
     page_cookies = page.cookies(as_dict=True)
-    
-    if cookie:
-        page.set.cookies(cookie)
-        page.refresh()
-        page_cookies = page.cookies(as_dict=True)
     log.debug("-*-"*10)
-    log.debug(f"page_html: {page.html}")
+    log.debug(f"page_html: {page.title}")
     log.debug(f"user_agent: {user_agent}")
     log.debug(f"cookies: {page_cookies}")
     log.debug("-*-"*10)
