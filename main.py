@@ -230,6 +230,8 @@ async def main():
     for fid in fid_list:
         await crawler(fid)
 
+    browser.close_page()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
