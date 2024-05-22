@@ -25,7 +25,8 @@ class BrowserAutomation:
         self.page_instance.get(url)
         log.debug(f"Browser page url is : {url}")
         if self.page_instance.title == "Just a moment...":
-            print(self.page_instance.title)
+            log.debug(self.page_instance.title)
+            log.debug("触发cloudflare challenge验证")
             i = self.page_instance.get_frame('@src^https://challenges.cloudflare.com/cdn-cgi')
             self.page_instance.wait.eles_loaded('.cb-i')
             e = i.ele('.cb-i')
