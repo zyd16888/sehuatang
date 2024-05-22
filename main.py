@@ -1,17 +1,15 @@
 import asyncio
-import httpx
 import bs4
 import re
 import time
 
-from drissionpage import get_user_agent_and_cookies
+from drissio import BrowserAutomation
 from util.mongo import save_data, compare_tid, filter_data
 from util.log_util import log
 from util.save_to_mysql import SaveToMysql
 from util.sendTelegram import send_media_group, rec_message
 from util.config import (
     domain,
-    cookie,
     fid_list,
     page_num,
     date,
@@ -19,10 +17,13 @@ from util.config import (
     mysql_enable,
     tg_enable,
     proxy,
+    proxy_enable
 )
 
 user_agent = ""
 page_cookies = {}
+
+browser = BrowserAutomation(proxy_enable=proxy_enable, proxy_url=proxy)
 
 # 获取帖子的id(访问板块)
 async def get_plate_info(fid: int, page: int, proxy: str, date_time):
@@ -47,10 +48,14 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
 
     log.debug(f"get_plate_info url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
 
-    async with httpx.AsyncClient(proxies=proxy) as client:
-        response = await client.get(url, headers=headers, cookies=page_cookies)
+    # async with httpx.AsyncClient(proxies=proxy) as client:
+    #     response = await client.get(url, headers=headers, cookies=page_cookies)
+
+    html_response = browser.get_page_html(url)
+
+    # log.debug(f"get_plate_info response is : {html_response}")
     # 使用bs4解析
-    soup = bs4.BeautifulSoup(response.text, "html.parser")
+    soup = bs4.BeautifulSoup(html_response, "html.parser")
     # print(soup)
     all = soup.find_all(id=re.compile("^normalthread_"))
     try:
@@ -105,11 +110,13 @@ async def get_page(tid, proxy, f_info):
     }
 
     try:
-        log.debug(f"get_page url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
-        async with httpx.AsyncClient(proxies=proxy) as client:
-            response = await client.get(url, headers=headers, cookies=page_cookies)
+        # log.debug(f"get_page url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
+        # async with httpx.AsyncClient(proxies=proxy) as client:
+        #     response = await client.get(url, headers=headers, cookies=page_cookies)
 
-        soup = bs4.BeautifulSoup(response.text, "html.parser")
+        html_response = browser.get_page_html(url)
+
+        soup = bs4.BeautifulSoup(html_response, "html.parser")
         # 获取帖子的标题
         title = soup.find("h1", class_="ts").find("span").get_text()
         # 楼主发布的内容
@@ -219,11 +226,6 @@ async def crawler(fid):
 
 async def main():
     log.debug(f"日期: {date()}")
-
-    global user_agent
-    global page_cookies
-
-    user_agent, page_cookies = get_user_agent_and_cookies()
 
     for fid in fid_list:
         await crawler(fid)
