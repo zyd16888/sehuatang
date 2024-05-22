@@ -38,15 +38,15 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
     log.info("Crawl the plate " + str(fid) + " page number " + str(page))
     url = "https://{}/forum-{}-{}.html".format(domain, fid, page)
     # headers
-    headers = {
-        "User-Agent": user_agent
-    }
+    # headers = {
+    #     "User-Agent": user_agent
+    # }
 
     # 存放字典的列表
     info_list = []
     tid_list = []
 
-    log.debug(f"get_plate_info url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
+    # log.debug(f"get_plate_info url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
 
     # async with httpx.AsyncClient(proxies=proxy) as client:
     #     response = await client.get(url, headers=headers, cookies=page_cookies)
