@@ -32,7 +32,12 @@ class BrowserAutomation:
             e = i.ele('.cb-i')
             e.click()
             self.page_instance.wait.load_start()
-            time.sleep(3)
+            time.sleep(5)
+
+            # 重新请求页面
+            self.page_instance.get(url)
+            log.debug(f"重新请求页面: {url}")
+
         
         if self.page_instance.title == domain.upper():
             enterdiv = self.page_instance.ele('.enter-btn')
