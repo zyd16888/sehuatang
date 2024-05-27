@@ -18,7 +18,7 @@ class BrowserAutomation:
                 log.debug(f"proxy enable url is : {self.proxy_url}")
                 co.set_proxy(self.proxy_url)
             co.set_user_agent(self.user_agent)
-            co.headless()
+            # co.headless()
             self.page_instance = WebPage(chromium_options=co)
 
     def get_page_html(self, url):
@@ -33,10 +33,6 @@ class BrowserAutomation:
             e.click()
             self.page_instance.wait.load_start()
             time.sleep(5)
-
-            # 重新请求页面
-            self.page_instance.get(url)
-            log.debug(f"重新请求页面: {url}")
 
         
         if self.page_instance.title == domain.upper():
