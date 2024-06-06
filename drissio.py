@@ -29,6 +29,7 @@ class BrowserAutomation:
             log.debug("触发cloudflare challenge验证")
             i = self.page_instance.get_frame('@src^https://challenges.cloudflare.com/cdn-cgi')
             self.page_instance.wait.eles_loaded('.cb-i')
+            time.sleep(3)
             e = i.ele('.cb-i')
             e.click()
             self.page_instance.wait.load_start()
@@ -55,6 +56,6 @@ class BrowserAutomation:
 if __name__ == "__main__":
     browser = BrowserAutomation(proxy_enable=proxy_enable, proxy_url=proxy_url)
     url = "https://sehuatang.org"
-    html = browser.get_page_html(url, domain)
+    html = browser.get_page_html(url)
     print(html)
     browser.close_page()
