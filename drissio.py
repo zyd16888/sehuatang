@@ -30,6 +30,7 @@ class BrowserAutomation:
             i = self.page_instance.get_frame('@src^https://challenges.cloudflare.com/cdn-cgi')
             self.page_instance.wait.eles_loaded('.cb-i')
             time.sleep(3)
+            print(self.page_instance.html)
             e = i.ele('.cb-i')
             e.click()
             self.page_instance.wait.load_start()
