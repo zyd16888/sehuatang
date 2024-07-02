@@ -228,7 +228,7 @@ async def main():
     log.debug(f"日期: {date()}")
 
     log.debug(f"浏览主页： {domain}")
-    html_response = browser.get_page_html(domain)
+    html_response = browser.get_page_html("https://{}".format(domain))
     # 打印页面标题
     soup = bs4.BeautifulSoup(html_response, "html.parser")
     log.debug(soup.title.get_text())
