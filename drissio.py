@@ -1,3 +1,4 @@
+import random
 from DrissionPage import ChromiumOptions, WebPage
 from util.log_util import log
 from util.config import domain, proxy_enable, proxy_url
@@ -24,6 +25,9 @@ class BrowserAutomation:
     def get_page_html(self, url):
         self.page_instance.get(url)
         log.debug(f"Browser page url is : {url}")
+        # 选择3到5秒之间的随机暂停时间
+        sleep_duration = random.uniform(3, 5)
+        time.sleep(sleep_duration)
         if self.page_instance.title == "Just a moment...":
             log.debug(self.page_instance.title)
             log.debug("触发cloudflare challenge验证")

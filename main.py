@@ -227,6 +227,12 @@ async def crawler(fid):
 async def main():
     log.debug(f"日期: {date()}")
 
+    log.debug(f"浏览主页： {domain}")
+    html_response = browser.get_page_html(domain)
+    # 打印页面标题
+    soup = bs4.BeautifulSoup(html_response, "html.parser")
+    log.debug(soup.title.get_text())
+
     for fid in fid_list:
         await crawler(fid)
 
