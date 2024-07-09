@@ -1,16 +1,15 @@
 import asyncio
-import httpx
 import bs4
 import re
 import time
 
+from drissio import BrowserAutomation
 from util.mongo import save_data, compare_tid, filter_data
 from util.log_util import log
 from util.save_to_mysql import SaveToMysql
 from util.sendTelegram import send_media_group, rec_message
 from util.config import (
     domain,
-    cookie,
     fid_list,
     page_num,
     date,
@@ -18,8 +17,13 @@ from util.config import (
     mysql_enable,
     tg_enable,
     proxy,
+    proxy_enable
 )
 
+user_agent = ""
+page_cookies = {}
+
+browser = BrowserAutomation(proxy_enable=proxy_enable, proxy_url=proxy)
 
 # 获取帖子的id(访问板块)
 async def get_plate_info(fid: int, page: int, proxy: str, date_time):
@@ -34,18 +38,24 @@ async def get_plate_info(fid: int, page: int, proxy: str, date_time):
     log.info("Crawl the plate " + str(fid) + " page number " + str(page))
     url = "https://{}/forum-{}-{}.html".format(domain, fid, page)
     # headers
-    headers = {
-        "cookie": cookie,
-    }
+    # headers = {
+    #     "User-Agent": user_agent
+    # }
 
     # 存放字典的列表
     info_list = []
     tid_list = []
 
-    async with httpx.AsyncClient(proxies=proxy) as client:
-        response = await client.get(url, headers=headers)
+    # log.debug(f"get_plate_info url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
+
+    # async with httpx.AsyncClient(proxies=proxy) as client:
+    #     response = await client.get(url, headers=headers, cookies=page_cookies)
+
+    html_response = browser.get_page_html(url)
+
+    # log.debug(f"get_plate_info response is : {html_response}")
     # 使用bs4解析
-    soup = bs4.BeautifulSoup(response.text, "html.parser")
+    soup = bs4.BeautifulSoup(html_response, "html.parser")
     # print(soup)
     all = soup.find_all(id=re.compile("^normalthread_"))
     try:
@@ -96,14 +106,17 @@ async def get_page(tid, proxy, f_info):
     url = "https://{}/?mod=viewthread&tid={}".format(domain, tid)
     # headers
     headers = {
-        "cookie": cookie,
+        "User-Agent": user_agent
     }
 
     try:
-        async with httpx.AsyncClient(proxies=proxy) as client:
-            response = await client.get(url, headers=headers)
+        # log.debug(f"get_page url is : {url}, headers is : {headers}, cookies is : {page_cookies}")
+        # async with httpx.AsyncClient(proxies=proxy) as client:
+        #     response = await client.get(url, headers=headers, cookies=page_cookies)
 
-        soup = bs4.BeautifulSoup(response.text, "html.parser")
+        html_response = browser.get_page_html(url)
+
+        soup = bs4.BeautifulSoup(html_response, "html.parser")
         # 获取帖子的标题
         title = soup.find("h1", class_="ts").find("span").get_text()
         # 楼主发布的内容
@@ -214,8 +227,17 @@ async def crawler(fid):
 async def main():
     log.debug(f"日期: {date()}")
 
+    log.debug(f"浏览主页： {domain}")
+    html_response = browser.get_page_html("https://{}".format(domain))
+    # 打印页面标题
+    soup = bs4.BeautifulSoup(html_response, "html.parser")
+    log.debug(soup.title.get_text())
+
     for fid in fid_list:
         await crawler(fid)
+
+    browser.close_page()
+    log.debug("运行结束")
 
 
 if __name__ == "__main__":

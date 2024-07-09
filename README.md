@@ -1,6 +1,8 @@
 # 色花堂BT区页面爬取脚本
 
-cloudflare challenge 难以绕过，停止开发
+---
+
+Fork from [SingleJohn/sehuatang](https://github.com/SingleJohn/sehuatang) , 自用修改
 
 ---
 v2 版本使用说明
