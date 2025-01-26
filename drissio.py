@@ -31,7 +31,7 @@ class BrowserAutomation:
             co.set_argument("--disable-dev-shm-usage")
 
             # Additional debug log
-            log.debug("Chromium options configured: %s", co.arguments)
+            log.debug(f"Chromium options configured: {co.arguments}")
 
             # Attempt to create a WebPage instance
             try:
