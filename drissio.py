@@ -26,9 +26,9 @@ class BrowserAutomation:
                 co.set_proxy(self.proxy_url)
             co.set_user_agent(self.user_agent)
             # Add headless and other recommended startup arguments
-            co.add_argument("--headless=new")
-            co.add_argument("--no-sandbox")
-            co.add_argument("--disable-dev-shm-usage")
+            co.set_argument("--headless=new")
+            co.set_argument("--no-sandbox")
+            co.set_argument("--disable-dev-shm-usage")
 
             # Additional debug log
             log.debug("Chromium options configured: %s", co.arguments)
