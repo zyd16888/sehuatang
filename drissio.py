@@ -10,17 +10,36 @@ class BrowserAutomation:
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         self.proxy_enable = proxy_enable
         self.proxy_url = proxy_url
-        self.initialize_page()
+        # Initialize the browser page
+        try:
+            self.initialize_page()
+        except Exception as e:
+            log.error(f"Failed to initialize browser page: {e}")
+            raise
 
     def initialize_page(self):
         if self.page_instance is None:
             co = ChromiumOptions()
-            if self.proxy_enable:
-                log.debug(f"proxy enable url is : {self.proxy_url}")
+            # Set proxy if enabled
+            if self.proxy_enable and self.proxy_url:
+                log.debug(f"Enabling proxy with URL: {self.proxy_url}")
                 co.set_proxy(self.proxy_url)
             co.set_user_agent(self.user_agent)
-            co.headless()
-            self.page_instance = WebPage(chromium_options=co)
+            # Add headless and other recommended startup arguments
+            co.add_argument("--headless=new")
+            co.add_argument("--no-sandbox")
+            co.add_argument("--disable-dev-shm-usage")
+
+            # Additional debug log
+            log.debug("Chromium options configured: %s", co.arguments)
+
+            # Attempt to create a WebPage instance
+            try:
+                self.page_instance = WebPage(chromium_options=co)
+                log.info("Browser page instance successfully initialized.")
+            except Exception as e:
+                log.error(f"Error initializing WebPage: {e}")
+                raise
 
     def get_page_html(self, url):
         self.page_instance.get(url)
@@ -40,14 +59,13 @@ class BrowserAutomation:
             self.page_instance.wait.load_start()
             time.sleep(5)
 
-        
         if self.page_instance.title == domain.upper():
             enterdiv = self.page_instance.ele('.enter-btn')
             log.debug(enterdiv.html)
             time.sleep(1)
             enterdiv.click()
             time.sleep(3)
-        
+
         page_html = self.page_instance.html
         log.debug(f"Browser page title is : {self.page_instance.title}")
         return page_html
