@@ -133,11 +133,23 @@ def send_media_group(data_list, fid):
     # 发送文本消息
     if len(data_list) > 0:
         send_message_text = rec_message(data_list, fid)
-        msg = antiflood(bot.send_message, chat_id=tg_chat_id, text=send_message_text)
-        log.info(f"send telegram message, return msg: {msg.json}")
+
+        if send_message_text:  # 确保消息内容不为空
+            msg = antiflood(
+                bot.send_message, chat_id=tg_chat_id, text=send_message_text
+            )
+            log.info(f"send telegram message, return msg: {msg.json}")
+        else:
+            log.debug("rec_message returned an empty message, skipping send_message")
+
 
 MAX_MESSAGE_LENGTH = 4000  # 预留一些字符，防止超限
+
 def rec_message(data_list, fid):
+    if not data_list:
+        log.debug("data_list is empty, skipping send_message")
+        return  # 直接返回，避免发送空消息
+
     tag_name = fid_json.get(fid, "other")
     name_list = [data["number"] + " " + data["title"] for data in data_list]
     time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -159,10 +171,10 @@ def rec_message(data_list, fid):
 
     for name in name_list:
         if current_length + len(name) + 1 > MAX_MESSAGE_LENGTH:
-            # 发送当前批次
-            batch_text = "\n".join(current_batch)
-            log.debug(f"Sending batch message:\n{batch_text}")
-            antiflood(bot.send_message, chat_id=tg_chat_id, text=batch_text)
+            if current_batch:  # 确保 current_batch 不为空
+                batch_text = "\n".join(current_batch)
+                log.debug(f"Sending batch message:\n{batch_text}")
+                antiflood(bot.send_message, chat_id=tg_chat_id, text=batch_text)
 
             # 清空批次，准备新的
             current_batch = []
@@ -173,7 +185,7 @@ def rec_message(data_list, fid):
         current_length += len(name) + 1  # 计算换行符的长度
 
     # 发送剩余部分
-    if current_batch:
+    if current_batch:  # 确保最后一条消息不为空
         batch_text = "\n".join(current_batch)
         log.debug(f"Sending final batch message:\n{batch_text}")
         antiflood(bot.send_message, chat_id=tg_chat_id, text=batch_text)
