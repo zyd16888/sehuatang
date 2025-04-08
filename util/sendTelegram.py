@@ -23,8 +23,13 @@ if tg_enable:
             "https": proxy,
         }
 else:
-    bot = None
-    log.info("telegram bot is disabled")
+    bot = telebot.TeleBot(tg_bot_token)
+    if proxy is not None:
+        apihelper.proxy = {
+            "http": proxy,
+            "https": proxy,
+        }
+    log.info("telegram bot send image is disabled")
 
 
 def special_char_sub(text):
