@@ -3,10 +3,10 @@ import os
 
 dir = os.path.dirname(__file__)
 # 优先从config目录读取配置文件
-config_path = os.path.join(dir, "config", "config.yaml")
+config_path = os.path.join(dir, "../config", "config.yaml")
 if not os.path.exists(config_path):
     # 如果config目录下没有，则尝试读取项目根目录的配置文件
-    config_path = os.path.join(dir, "config.yaml")
+    config_path = os.path.join(dir, "../config.yaml")
 
 
 # 读取配置文件
