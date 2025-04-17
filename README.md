@@ -2,6 +2,11 @@
 
 ---
 
+2025.04.17 更新
+
+增加docker镜像, 可使用 docker-compose 文件一键启动服务
+
+
 Fork from [SingleJohn/sehuatang](https://github.com/SingleJohn/sehuatang) , 自用修改
 
 ---
