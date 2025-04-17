@@ -10,3 +10,4 @@ pymysql>=1.0.2
 schedule>=1.1.0
 pyTelegramBotAPI>=4.10.0
 DrissionPage>=4.0.4.23
+apscheduler
