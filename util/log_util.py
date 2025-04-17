@@ -25,6 +25,12 @@ handlers = {
 }
 
 
+# 创建标准输出流处理器
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.INFO)  # 可以调整级别，默认INFO级别以上才输出到控制台
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+stdout_handler.setFormatter(formatter)
+
 def createHandlers():
     logLevels = handlers.keys()
 
@@ -56,7 +62,14 @@ class TNLog(object):
 
             logger.addHandler(handlers[level])
 
+            # 添加标准输出处理器（只给INFO及以上级别的logger添加控制台输出）
+            if level >= logging.INFO:
+                logger.addHandler(stdout_handler)
+
             logger.setLevel(level)
+
+            # 防止日志重复输出
+            logger.propagate = False
 
             self.__loggers.update({level: logger})
 
