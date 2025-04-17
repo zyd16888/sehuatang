@@ -1,32 +1,17 @@
 version: '3'
+
 services:
-  sht_main:
-    build:
-      context: .
-      dockerfile: main.Dockerfile
-    command: 'python schedule_main.py'
+  unicorn:
+    image: cxsz16888/sehuatang:latest
+    container_name: sehuatang
+    restart: unless-stopped
     volumes:
-      - .:/app
-    depends_on:
-      - sht_mongodb
-      - sht_mysql
-
-  sht_mongodb:
-    image: mongo:3.6
-    restart: always
-    volumes:
-      - .mongodb:/data/db
-    ports:
-      - "27018:27017"
-
-  sht_mysql:
-    image: mysql:8.0.29
-    restart: always
-    container_name: "sht_mysql"
+      # 挂载配置文件目录
+      - ./config:/app/config
+      # 挂载日志目录
+      - ./logs:/app/logs
     environment:
-      MYSQL_ROOT_PASSWORD: 'root'
-    ports:
-      - "33067:3306"
-    volumes:
-      - ./mysql_init:/docker-entrypoint-initdb.d
-      - .mysql:/var/lib/mysql
+      # 设置时区
+      - TZ=Asia/Shanghai
+    # 使用Python脚本作为入口点
+    command: python run.py 
