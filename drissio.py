@@ -25,10 +25,13 @@ class BrowserAutomation:
                 log.debug(f"Enabling proxy with URL: {self.proxy_url}")
                 co.set_proxy(self.proxy_url)
             co.set_user_agent(self.user_agent)
-            # Add headless and other recommended startup arguments
-            co.set_argument("--headless=new")
-            co.set_argument("--no-sandbox")
-            co.set_argument("--disable-dev-shm-usage")
+            # 添加Docker环境下必需的参数
+            co.set_argument("--headless=new")  # 无头浏览器
+            co.set_argument("--no-sandbox")  # Docker中必须添加此参数
+            co.set_argument("--disable-dev-shm-usage")  # 禁用/dev/shm使用
+            co.set_argument("--disable-gpu")  # 禁用GPU加速
+            co.set_argument("--disable-extensions")  # 禁用扩展
+            co.set_argument("--disable-setuid-sandbox")  # 禁用setuid沙盒
 
             # Additional debug log
             log.debug(f"Chromium options configured: {co.arguments}")
