@@ -51,3 +51,6 @@ def date():
 
 
 schedule_time = get_config("schedule_time")
+
+
+schedule_cron = get_config("schedule_cron")
