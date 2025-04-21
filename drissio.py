@@ -32,6 +32,10 @@ class BrowserAutomation:
             co.set_argument("--disable-gpu")  # 禁用GPU加速
             co.set_argument("--disable-extensions")  # 禁用扩展
             co.set_argument("--disable-setuid-sandbox")  # 禁用setuid沙盒
+            # 添加更多稳定性参数
+            co.set_argument("--remote-debugging-port=9222")
+            co.set_argument("--disable-web-security")
+            co.set_argument("--ignore-certificate-errors")
 
             # Additional debug log
             log.debug(f"Chromium options configured: {co.arguments}")
@@ -44,39 +48,89 @@ class BrowserAutomation:
                 log.error(f"Error initializing WebPage: {e}")
                 raise
 
-    def get_page_html(self, url):
-        self.page_instance.get(url)
-        log.debug(f"Browser page url is : {url}")
-        # 选择3到5秒之间的随机暂停时间
-        sleep_duration = random.uniform(3, 5)
-        time.sleep(sleep_duration)
-        if self.page_instance.title == "Just a moment...":
-            log.debug(self.page_instance.title)
-            log.debug("触发cloudflare challenge验证")
-            i = self.page_instance.get_frame('@src^https://challenges.cloudflare.com/cdn-cgi')
-            self.page_instance.wait.eles_loaded('.cb-i')
-            time.sleep(3)
-            print(self.page_instance.html)
-            e = i.ele('.cb-i')
-            e.click()
-            self.page_instance.wait.load_start()
-            time.sleep(5)
+    def get_page_html(self, url, max_retries=3):
+        """获取页面HTML内容，添加重试机制"""
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                # 如果页面实例不存在，重新初始化
+                if self.page_instance is None:
+                    self.initialize_page()
 
-        if self.page_instance.title == domain.upper():
-            enterdiv = self.page_instance.ele('.enter-btn')
-            log.debug(enterdiv.html)
-            time.sleep(1)
-            enterdiv.click()
-            time.sleep(3)
+                self.page_instance.get(url)
+                log.debug(f"Browser page url is : {url}")
 
-        page_html = self.page_instance.html
-        log.debug(f"Browser page title is : {self.page_instance.title}")
-        return page_html
+                # 选择3到5秒之间的随机暂停时间
+                sleep_duration = random.uniform(3, 5)
+                time.sleep(sleep_duration)
+
+                # 使用安全的方式获取标题
+                try:
+                    page_title = self.page_instance.title
+                    log.debug(f"页面标题: {page_title}")
+
+                    if page_title == "Just a moment...":
+                        log.debug("触发cloudflare challenge验证")
+                        try:
+                            i = self.page_instance.get_frame(
+                                '@src^https://challenges.cloudflare.com/cdn-cgi')
+                            self.page_instance.wait.eles_loaded(
+                                '.cb-i', timeout=10)
+                            time.sleep(3)
+
+                            e = i.ele('.cb-i')
+                            e.click()
+                            self.page_instance.wait.load_start()
+                            time.sleep(5)
+                        except Exception as e:
+                            log.error(f"处理Cloudflare验证时出错: {e}")
+
+                    if page_title == domain.upper():
+                        try:
+                            enterdiv = self.page_instance.ele('.enter-btn')
+                            log.debug(
+                                f"找到入口按钮: {enterdiv.html if enterdiv else 'None'}")
+                            time.sleep(1)
+                            enterdiv.click()
+                            time.sleep(3)
+                        except Exception as e:
+                            log.error(f"点击入口按钮时出错: {e}")
+                except Exception as e:
+                    log.error(f"获取页面标题时出错: {e}")
+
+                # 获取页面HTML
+                try:
+                    page_html = self.page_instance.html
+                    log.debug(f"成功获取页面HTML，页面标题: {self.page_instance.title}")
+                    return page_html
+                except Exception as e:
+                    log.error(f"获取页面HTML时出错: {e}")
+                    raise
+
+            except Exception as e:
+                retry_count += 1
+                log.error(f"获取页面时出错 (重试 {retry_count}/{max_retries}): {e}")
+
+                # 关闭并重新初始化浏览器
+                self.close_page()
+                time.sleep(2)  # 等待浏览器彻底关闭
+
+                if retry_count >= max_retries:
+                    log.error(f"达到最大重试次数 ({max_retries})，返回空HTML")
+                    return ""
+
+        return ""
 
     def close_page(self):
+        """安全关闭页面实例"""
         if self.page_instance is not None:
-            self.page_instance.quit()
-            self.page_instance = None
+            try:
+                self.page_instance.quit()
+                log.debug("浏览器页面已关闭")
+            except Exception as e:
+                log.error(f"关闭浏览器页面时出错: {e}")
+            finally:
+                self.page_instance = None
 
 # 示例用法
 if __name__ == "__main__":
