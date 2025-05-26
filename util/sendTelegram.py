@@ -91,9 +91,9 @@ def send_media_group(data_list, fid):
 
         # 处理文本信息
         if magnet_115 is None:
-            content = f"\n{num} {title}\n\n磁力链接：\n{magnet}\n\n发布时间：{post_time}\n\n #{tag_name}"
+            content = f"\n{num} {title}\n\n磁力链接：\n`{magnet}`\n\n发布时间：{post_time}\n\n #{tag_name}"
         else:
-            content = f"\n{num} {title}\n\n磁力链接：\n{magnet}\n防115屏蔽压缩包磁链：\n{magnet_115}\n\n发布时间：{post_time}\n\n #{tag_name} "
+            content = f"\n{num} {title}\n\n磁力链接：\n`{magnet}`\n防115屏蔽压缩包磁链：\n`{magnet_115}`\n\n发布时间：{post_time}\n\n #{tag_name} "
 
         content = special_char_sub(content)
 
