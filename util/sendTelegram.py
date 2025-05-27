@@ -33,6 +33,22 @@ else:
 
 
 def special_char_sub(text):
+    # 占位：先保护行内代码片段
+    protected_code = {}
+    placeholder_prefix = "##CODE_BLOCK_PLACEHOLDER_"
+
+    import re
+
+    code_pattern = r"`([^`]+)`"
+    matches = re.finditer(code_pattern, text)
+
+    for idx, match in enumerate(matches):
+        full_match = match.group(0)
+        key = f"{placeholder_prefix}{idx}##"
+        protected_code[key] = full_match
+        text = text.replace(full_match, key)
+
+    # 转义 MarkdownV2 特殊字符
     old_strs = [
         "_",
         "*",
@@ -73,8 +89,13 @@ def special_char_sub(text):
         r"\.",
         r"\!",
     ]
-    for i in range(len(old_strs)):
-        text = text.replace(old_strs[i], new_strs[i])
+    for old, new in zip(old_strs, new_strs):
+        text = text.replace(old, new)
+
+    # 还原被保护的 code 区块
+    for key, code in protected_code.items():
+        text = text.replace(key, code)
+
     return text
 
 
