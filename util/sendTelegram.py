@@ -33,22 +33,20 @@ else:
 
 
 def special_char_sub(text):
-    # 占位：先保护行内代码片段
+    # 用于保存 code 块
     protected_code = {}
-    placeholder_prefix = "##CODE_BLOCK_PLACEHOLDER_"
 
-    import re
+    # 替换函数，用于 re.sub 中
+    def replace_code_block(match):
+        idx = len(protected_code)
+        placeholder = f"CODEBLOCKPLACEHOLDER{idx}UNIQUE"
+        protected_code[placeholder] = match.group(0)  # 包括反引号的完整内容
+        return placeholder
 
-    code_pattern = r"`([^`]+)`"
-    matches = re.finditer(code_pattern, text)
+    # 第一步：用正则替换所有 `code` 块为占位符
+    text = re.sub(r"`[^`]+`", replace_code_block, text)
 
-    for idx, match in enumerate(matches):
-        full_match = match.group(0)
-        key = f"{placeholder_prefix}{idx}##"
-        protected_code[key] = full_match
-        text = text.replace(full_match, key)
-
-    # 转义 MarkdownV2 特殊字符
+    # 第二步：转义 MarkdownV2 特殊字符
     old_strs = [
         "_",
         "*",
@@ -92,9 +90,9 @@ def special_char_sub(text):
     for old, new in zip(old_strs, new_strs):
         text = text.replace(old, new)
 
-    # 还原被保护的 code 区块
-    for key, code in protected_code.items():
-        text = text.replace(key, code)
+    # 第三步：还原 code 块
+    for placeholder, code in protected_code.items():
+        text = text.replace(placeholder, code)
 
     return text
 
@@ -218,4 +216,15 @@ def rec_message(data_list, fid):
 
 
 if __name__ == "__main__":
+    text = """
+com-452 中出しされたパパ活美少女 「ゴムして」って言ったよね
+
+磁力链接：
+`magnet:?xt=urn:btih:B1B5FB29ADCC2A05EECB7539AC70BFF455AB7CA7`
+
+发布时间：2025-05-26 12:32:48
+
+"""
+    text = special_char_sub(text)
+    print(text)
     pass
