@@ -18,8 +18,8 @@ RUN apt-get update && apt-get install -y \
 # 复制依赖文件
 COPY requirements.txt .
 
-# 安装Python依赖到临时目录
-RUN pip install --no-cache-dir --user -r requirements.txt
+# 安装Python依赖
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 运行阶段
 FROM python:3.11-slim
@@ -45,8 +45,9 @@ RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor
 # 设置工作目录
 WORKDIR /app
 
-# 从构建阶段复制Python包
-COPY --from=builder /root/.local /home/appuser/.local
+# 从构建阶段复制Python包和依赖
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
 # 复制应用代码
 COPY --chown=appuser:appuser . .
@@ -58,7 +59,6 @@ RUN mkdir -p /app/logs /app/config \
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
-ENV PATH=/home/appuser/.local/bin:$PATH
 ENV DISPLAY=:99
 
 # 构建信息标签
