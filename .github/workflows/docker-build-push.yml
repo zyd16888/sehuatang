@@ -1,34 +1,181 @@
-name: 构建并推送Docker镜像
+name: 🐳 构建并推送Docker镜像
 
 on:
   push:
-    branches: [ main, master, v2]
+    branches: [ main, master, v2 ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '自定义标签'
+        required: false
+        default: 'latest'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: cxsz16888/sehuatang
 
 jobs:
-  build-and-push:
+  # 安全扫描和代码检查
+  security-scan:
     runs-on: ubuntu-latest
-    
+    if: github.event_name == 'pull_request'
     steps:
       - name: 检出代码
-        uses: actions/checkout@v2
-      
-      - name: 设置Docker Buildx
-        uses: docker/setup-buildx-action@v1
-      
-      - name: 登录Docker Hub
-        uses: docker/login-action@v1
+        uses: actions/checkout@v4
+
+      - name: 运行Trivy漏洞扫描
+        uses: aquasecurity/trivy-action@master
         with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: 上传Trivy扫描结果
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # 构建和推送镜像
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+    if: always() && (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped')
+
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 设置Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+
+      - name: 登录Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      
+
+      - name: 提取元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=Sehuatang Crawler
+            org.opencontainers.image.description=高效的论坛数据抓取系统
+            org.opencontainers.image.vendor=Sehuatang Project
+            org.opencontainers.image.licenses=MIT
+
       - name: 构建并推送镜像
-        uses: docker/build-push-action@v2
+        id: build
+        uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
-          tags: cxsz16888/sehuatang:latest
-          cache-from: type=registry,ref=cxsz16888/sehuatang:buildcache
-          cache-to: type=registry,ref=cxsz16888/sehuatang:buildcache,mode=max 
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+            REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
+
+      - name: 镜像漏洞扫描
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+
+      - name: 上传镜像扫描结果
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+
+  # 部署测试
+  test-deployment:
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.event_name != 'pull_request' && needs.build-and-push.result == 'success'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 测试Docker镜像
+        run: |
+          # 创建测试配置
+          mkdir -p test-config
+          cp config/config.example.yaml test-config/config.yaml
+
+          # 运行健康检查
+          docker run --rm \
+            -v $(pwd)/test-config:/app/config \
+            ${{ needs.build-and-push.outputs.image-tags }} \
+            python run.py --mode health
+
+      - name: 测试容器启动
+        run: |
+          # 测试容器能否正常启动
+          docker run --rm -d \
+            --name test-container \
+            -v $(pwd)/test-config:/app/config \
+            ${{ needs.build-and-push.outputs.image-tags }} \
+            sleep 30
+
+          # 等待容器启动
+          sleep 10
+
+          # 检查容器状态
+          docker ps | grep test-container
+
+          # 清理
+          docker stop test-container || true
+
+  # 通知
+  notify:
+    runs-on: ubuntu-latest
+    needs: [build-and-push, test-deployment]
+    if: always() && github.event_name != 'pull_request'
+
+    steps:
+      - name: 发送成功通知
+        if: needs.build-and-push.result == 'success' && needs.test-deployment.result == 'success'
+        run: |
+          echo "✅ Docker镜像构建和测试成功完成！"
+          echo "📦 镜像标签: ${{ needs.build-and-push.outputs.image-tags }}"
+          echo "🔍 镜像摘要: ${{ needs.build-and-push.outputs.image-digest }}"
+
+      - name: 发送失败通知
+        if: needs.build-and-push.result == 'failure' || needs.test-deployment.result == 'failure'
+        run: |
+          echo "❌ Docker镜像构建或测试失败！"
+          echo "请检查构建日志以获取详细信息。"

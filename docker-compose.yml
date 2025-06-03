@@ -1,17 +1,87 @@
-version: '3'
+version: '3.8'
 
 services:
-  unicorn:
+  sehuatang-crawler:
     image: cxsz16888/sehuatang:latest
-    container_name: sehuatang
+    container_name: sehuatang-crawler
     restart: unless-stopped
-    volumes:
-      # 挂载配置文件目录
-      - ./config:/app/config
-      # 挂载日志目录
-      - ./logs:/app/logs
+
+    # 环境变量
     environment:
-      # 设置时区
+      - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai
-    # 使用Python脚本作为入口点
-    command: python run.py 
+      # 可以通过环境变量覆盖配置
+      # - SHT_MONGODB_ENABLE=true
+      # - SHT_PROXY_PROXY_ENABLE=false
+
+    # 挂载卷
+    volumes:
+      - ./config:/app/config:ro  # 配置文件（只读）
+      - ./logs:/app/logs         # 日志文件
+      - crawler_data:/app/data   # 数据目录
+
+    # 网络配置
+    networks:
+      - crawler_network
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "run.py", "--mode", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 默认命令
+    command: ["python", "run.py"]
+
+  # Telegram Bot (可选，使用 --profile bot 启动)
+  telegram-bot:
+    image: cxsz16888/sehuatang:latest
+    container_name: sehuatang-bot
+    restart: unless-stopped
+    profiles: ["bot"]
+
+    command: ["python", "run.py", "--mode", "bot"]
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+
+    networks:
+      - crawler_network
+
+    depends_on:
+      - sehuatang-crawler
+
+# 网络配置
+networks:
+  crawler_network:
+    driver: bridge
+    name: sehuatang_network
+
+# 数据卷
+volumes:
+  crawler_data:
+    name: sehuatang_data
