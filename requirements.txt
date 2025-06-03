@@ -9,7 +9,7 @@ pymysql>=1.1.0
 DrissionPage>=4.0.4.23
 
 # 调度器
-APScheduler>=3.10.0
+apscheduler
 
 # Telegram Bot
 pyTelegramBotAPI>=4.14.0
