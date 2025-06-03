@@ -1,117 +1,203 @@
+"""
+优化的统一运行脚本
+支持多种运行模式和更好的错误处理
+"""
+from util.scheduler_manager import get_scheduler_manager
+from util.exceptions import ExceptionHandler
 import os
-import asyncio
 import sys
-import traceback
-import datetime
+import time
+import signal
+import argparse
+from pathlib import Path
 
-# APScheduler相关导入
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+# 添加项目根目录到Python路径
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
 
 from util.log_util import log
-from util.config import schedule_cron
 
 
-def run_async_task(coro):
-    """在单独的事件循环中运行协程"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    finally:
-        # 确保清理事件循环
-        if loop.is_running():
-            loop.stop()
-        if not loop.is_closed():
-            loop.close()
+class ApplicationRunner:
+    """应用程序运行器"""
 
-def run_sht_task():
-    """执行98tang实时任务"""
-    try:
-        start_time = datetime.datetime.now()
-        from main import main as run_main
-        log.info("开始执行98tang实时任务")
-        run_async_task(run_main())
-        end_time = datetime.datetime.now()
-        elapsed_time = (end_time - start_time).total_seconds()
-        log.info(f"98tang实时任务执行完成，耗时: {elapsed_time:.2f}秒")
-    except Exception as e:
-        log.error(f"失败: {str(e)}")
-        return
+    def __init__(self):
+        self.scheduler_manager = None
+        self.running = False
+
+        # 注册信号处理器
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """信号处理器"""
+        log.info(f"接收到信号 {signum}，正在优雅关闭...")
+        self.stop()
+
+    def run_once(self):
+        """运行一次主任务"""
+        try:
+            log.info("开始执行单次任务")
+
+            import asyncio
+            from main import main as main_task
+
+            # 运行主任务
+            asyncio.run(main_task())
+
+            log.info("单次任务执行完成")
+
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "执行单次任务时出错")
+            return False
+
+        return True
+
+    def run_scheduler(self):
+        """运行调度器模式"""
+        try:
+            log.info("=" * 60)
+            log.info("🚀 数据抓取调度器启动")
+            log.info(f"📁 工作目录: {os.getcwd()}")
+            log.info(f"🐍 Python版本: {sys.version}")
+            log.info("=" * 60)
+
+            # 获取调度器管理器
+            self.scheduler_manager = get_scheduler_manager()
+
+            # 启动调度器
+            if not self.scheduler_manager.start():
+                log.error("调度器启动失败")
+                return False
+
+            self.running = True
+            log.info("📊 调度器运行中，按Ctrl+C优雅退出...")
+
+            # 主循环
+            while self.running:
+                time.sleep(60)  # 每分钟检查一次
+
+                if self.running:  # 再次检查，避免在sleep期间被停止
+                    log.debug("调度器正常运行中...")
+
+            return True
+
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "运行调度器时出错")
+            return False
+
+    def run_bot(self):
+        """运行Telegram Bot"""
+        try:
+            log.info("🤖 启动Telegram Bot...")
+
+            from bot import run as run_bot
+            run_bot()
+
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "运行Telegram Bot时出错")
+            return False
+
+        return True
+
+    def stop(self):
+        """停止应用程序"""
+        log.info("正在停止应用程序...")
+        self.running = False
+
+        if self.scheduler_manager:
+            self.scheduler_manager.stop()
+
+        log.info("应用程序已停止")
+
+    def health_check(self):
+        """健康检查"""
+        try:
+            # 检查配置文件
+            from util.read_config import get_config
+            config = get_config()
+            if not config:
+                return False
+
+            # 检查日志系统
+            log.info("健康检查通过")
+            return True
+
+        except Exception as e:
+            log.error(f"健康检查失败: {e}")
+            return False
 
 
-def init_scheduler():
-    """初始化并启动APScheduler调度器"""
-    try:
-        # 记录启动信息
-        log.info("=" * 50)
-        log.info("APScheduler定时任务调度器启动")
-        log.info(f"当前工作目录: {os.getcwd()}")
-        log.info(f"Python版本: {sys.version}")
-        log.info("=" * 50)
+def create_argument_parser():
+    """创建命令行参数解析器"""
+    parser = argparse.ArgumentParser(
+        description="数据抓取系统运行器",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+运行模式说明:
+  scheduler  - 定时调度模式（默认）
+  once      - 单次执行模式
+  bot       - Telegram Bot模式
+  health    - 健康检查模式
 
-        # 创建调度器
-        scheduler = BackgroundScheduler()
+示例:
+  python run.py                    # 运行调度器
+  python run.py --mode once        # 执行一次任务
+  python run.py --mode bot         # 运行Telegram Bot
+  python run.py --mode health      # 健康检查
+        """
+    )
 
-        log.info(f"读取到定时任务配置: {schedule_cron}")
+    parser.add_argument(
+        "--mode",
+        choices=["scheduler", "once", "bot", "health"],
+        default="scheduler",
+        help="运行模式 (默认: scheduler)"
+    )
 
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="详细输出模式"
+    )
 
-        # 添加实时任务，直接使用cron表达式
-        scheduler.add_job(
-            run_sht_task,
-            CronTrigger.from_crontab(schedule_cron),
-            id='realtime_task',
-            name='98tang实时任务',
-            max_instances=1,  # 确保同一时间只有一个任务在执行
-            misfire_grace_time=600  # 任务错过执行时间后的宽限期（秒）
-        )
+    return parser
 
-        # 启动调度器
-        scheduler.start()
-        log.info("调度器已成功启动")
-
-        # 打印下一次执行的时间
-        for job in scheduler.get_jobs():
-            next_run_time = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
-            log.info(f"任务 '{job.name}' 下一次执行时间: {next_run_time}")
-
-        return scheduler
-
-    except Exception as e:
-        log.error(f"初始化调度器时发生异常: {str(e)}")
-        log.error(f"详细错误: {traceback.format_exc()}")
-        raise
 
 def main():
     """主函数"""
+    # 解析命令行参数
+    parser = create_argument_parser()
+    args = parser.parse_args()
+
+    # 设置日志级别
+    if args.verbose:
+        log.info("启用详细输出模式")
+
+    # 创建应用程序运行器
+    runner = ApplicationRunner()
+
     try:
-        # 初始化并启动调度器
-        scheduler = init_scheduler()
+        # 根据模式运行
+        if args.mode == "once":
+            success = runner.run_once()
+        elif args.mode == "bot":
+            success = runner.run_bot()
+        elif args.mode == "health":
+            success = runner.health_check()
+        else:  # scheduler
+            success = runner.run_scheduler()
 
-        # 保持主线程运行
-        log.info("调度器运行中，按Ctrl+C终止...")
-        try:
-            # 主线程保持运行
-            while True:
-                import time
-                time.sleep(300)
+        # 退出码
+        sys.exit(0 if success else 1)
 
-                # 每分钟打印一次任务状态
-                log.info("调度器正常运行中...")
-                for job in scheduler.get_jobs():
-                    next_run_time = job.next_run_time.strftime(
-                        "%Y-%m-%d %H:%M:%S")
-                    log.info(f"任务 '{job.name}' 下一次执行时间: {next_run_time}")
-
-        except KeyboardInterrupt:
-            log.info("检测到用户中断，正在关闭调度器...")
-            scheduler.shutdown()
-            log.info("调度器已关闭")
-
+    except KeyboardInterrupt:
+        log.info("用户中断程序")
+        runner.stop()
+        sys.exit(0)
     except Exception as e:
-        log.error(f"主程序运行时发生异常: {str(e)}")
-        log.error(f"详细错误: {traceback.format_exc()}")
-        raise
+        ExceptionHandler.handle_and_log(e, "程序运行时发生未处理的异常")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

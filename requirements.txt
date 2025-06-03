@@ -1,13 +1,20 @@
-beautifulsoup4>=4.10.0
-httpx>=0.22.0
-pymongo>=4.0.2
+# 核心依赖
+beautifulsoup4>=4.12.0
 PyYAML>=6.0
-python-telegram-bot>=13.11
-pymongo[srv]
-bs4>=0.0.1
-requests>=2.27.1
-pymysql>=1.0.2
-schedule>=1.1.0
-pyTelegramBotAPI>=4.10.0
+requests>=2.31.0
+pymongo[srv]>=4.6.0
+pymysql>=1.1.0
+
+# 爬虫相关
 DrissionPage>=4.0.4.23
-apscheduler
+
+# 调度器
+APScheduler>=3.10.0
+
+# Telegram Bot
+pyTelegramBotAPI>=4.14.0
+
+# 类型检查和开发工具（可选）
+# mypy>=1.0.0
+# black>=23.0.0
+# flake8>=6.0.0

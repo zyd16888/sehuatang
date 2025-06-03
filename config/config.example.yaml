@@ -1,0 +1,85 @@
+# 配置文件示例
+# 请复制此文件为 config.yaml 并填入真实配置
+
+mongodb:
+  enable: true
+  db_host: "your_mongodb_host"
+  db_port: 27017
+  connection_string: "mongodb+srv://username:password@cluster.mongodb.net/database"
+  use_conn_str: true
+
+mysql:
+  enable: false
+  host: "localhost"
+  port: 3306
+  user: "your_username"
+  password: "your_password"
+  db: "sehuatang"
+
+sehuatang:
+  # 域名
+  domain_name: "sehuatang.org"
+  domain_get_url: "https://sehuatang.org/forum-103-1.html"
+  cookie: "your_cookie_here"
+  # 板块id
+  fid:
+    103: "高清中文字幕"
+    104: "素人有码系列"
+    # 可以添加更多板块
+    # 37: "亚洲有码原创"
+    # 36: "亚洲无码原创"
+
+  # 抓取页数，10代表1-10页
+  page_num: 5
+  # 抓取日期(格式: yyyy-mm-dd), 如果为空, 则抓取当前日期
+  # 支持正则匹配，可输入 yyyy-mm 抓取指定月份的所有日期
+  date: null
+
+proxy:
+  # 代理服务器
+  proxy_url: "http://127.0.0.1:7890"
+  # 是否使用代理
+  proxy_enable: true
+
+sendMessage:
+  # 企业微信推送
+  send_wecom_enable: false
+  corp_id: "your_corp_id"
+  corp_secret: "your_corp_secret"
+  agent_id: 1000002
+  media_id: "your_media_id"
+  to_user: "@all"
+  
+  # Telegram 推送
+  send_telegram_enable: true
+  tg_bot_token: "your_bot_token"
+  tg_chat_id: "your_chat_id"
+  image_proxy_url: "https://your-image-proxy.com"
+
+# 定时任务配置
+schedule:
+  # 简单时间配置（已废弃，建议使用cron）
+  schedule_time:
+    - "01:00"
+    - "02:00"
+    - "03:00"
+    - "04:00"
+  
+  # Cron表达式配置（推荐）
+  # 格式：分 时 日 月 周
+  # 示例：每天凌晨2点执行
+  schedule_cron: "0 2 * * *"
+
+# 日志配置
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  max_file_size: 10485760  # 10MB
+  backup_count: 5
+  console_output: true
+
+# 性能配置
+performance:
+  max_concurrent_requests: 10
+  request_timeout: 30
+  retry_attempts: 3
+  retry_delay: 5

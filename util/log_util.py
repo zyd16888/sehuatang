@@ -1,50 +1,88 @@
 # -*- coding: utf-8 -*-
+"""
+优化的日志管理模块
+支持配置文件控制和更灵活的日志设置
+"""
 import os
 import sys
 import time
 import logging
 import inspect
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Optional
 
-dir = os.path.dirname(__file__)
-dir_time = time.strftime("%Y-%m-%d", time.localtime())
+# 获取项目根目录
+project_root = Path(__file__).parent.parent
+logs_dir = project_root / "logs"
 
-parent_dir = os.path.dirname(dir)
+# 确保日志目录存在
+logs_dir.mkdir(exist_ok=True)
 
+# 默认日志配置
+DEFAULT_LOG_CONFIG = {
+    "level": "INFO",
+    "max_file_size": 10 * 1024 * 1024,  # 10MB
+    "backup_count": 5,
+    "console_output": True
+}
 
-if os.path.exists(parent_dir + "/logs") is False:
-    os.mkdir(parent_dir + "/logs")
-
-
-handlers = {
-    logging.NOTSET: os.path.join(parent_dir, "logs/notset.log"),
-    logging.DEBUG: os.path.join(parent_dir, "logs/debug.log"),
-    logging.INFO: os.path.join(parent_dir, "logs/info.log"),
-    logging.WARNING: os.path.join(parent_dir, "logs/warning.log"),
-    logging.ERROR: os.path.join(parent_dir, "logs/error.log"),
-    logging.CRITICAL: os.path.join(parent_dir, "logs/critical.log"),
+# 日志文件路径配置
+LOG_FILES = {
+    logging.NOTSET: logs_dir / "notset.log",
+    logging.DEBUG: logs_dir / "debug.log",
+    logging.INFO: logs_dir / "info.log",
+    logging.WARNING: logs_dir / "warning.log",
+    logging.ERROR: logs_dir / "error.log",
+    logging.CRITICAL: logs_dir / "critical.log",
 }
 
 
-# 创建标准输出流处理器
-stdout_handler = logging.StreamHandler(sys.stdout)
-stdout_handler.setLevel(logging.INFO)  # 可以调整级别，默认INFO级别以上才输出到控制台
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-stdout_handler.setFormatter(formatter)
+def get_log_config():
+    """获取日志配置"""
+    try:
+        from util.read_config import get_config
+        return get_config("logging", DEFAULT_LOG_CONFIG)
+    except Exception:
+        return DEFAULT_LOG_CONFIG
 
-def createHandlers():
-    logLevels = handlers.keys()
 
-    for level in logLevels:
-        path = os.path.abspath(handlers[level])
-        handlers[level] = RotatingFileHandler(
-            path, maxBytes=10000000, backupCount=2, encoding="utf-8"
+def create_handlers():
+    """创建日志处理器"""
+    config = get_log_config()
+    handlers = {}
+
+    for level, log_file in LOG_FILES.items():
+        handler = RotatingFileHandler(
+            str(log_file),
+            maxBytes=config.get(
+                "max_file_size", DEFAULT_LOG_CONFIG["max_file_size"]),
+            backupCount=config.get(
+                "backup_count", DEFAULT_LOG_CONFIG["backup_count"]),
+            encoding="utf-8"
         )
+        handlers[level] = handler
+
+    return handlers
 
 
-# 加载模块时创建全局变量
+def create_console_handler():
+    """创建控制台处理器"""
+    config = get_log_config()
 
-createHandlers()
+    if not config.get("console_output", True):
+        return None
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    return handler
+
+
+# 创建处理器
+handlers = create_handlers()
+console_handler = create_console_handler()
 
 
 class TNLog(object):
@@ -64,8 +102,8 @@ class TNLog(object):
             logger.addHandler(handlers[level])
 
             # 添加标准输出处理器（只给INFO及以上级别的logger添加控制台输出）
-            if level >= logging.INFO:
-                logger.addHandler(stdout_handler)
+            if level >= logging.INFO and console_handler:
+                logger.addHandler(console_handler)
 
             logger.setLevel(level)
 
@@ -75,7 +113,10 @@ class TNLog(object):
             self.__loggers.update({level: logger})
 
     def getLogMessage(self, level, message):
-        frame, filename, lineNo, functionName, code, unknowField = inspect.stack()[2]
+        frame_info = inspect.stack()[2]
+        filename = frame_info.filename
+        lineNo = frame_info.lineno
+        functionName = frame_info.function
 
         """日志格式：[时间] [类型] [记录代码] 信息"""
 
