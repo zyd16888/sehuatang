@@ -1,0 +1,94 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache
+.coverage
+.tox
+.cache
+.mypy_cache
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Test files
+test/
+tests/
+*_test.py
+test_*.py
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+xxxx*.html
+2.html
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+
+# Backup files
+*_bak.*
+*_backup.*
+config_bak.yaml
+
+# Effect pictures (demo images)
+effect picture/
+
+# Development tools
+.pre-commit-config.yaml
+.flake8
+.black
+mypy.ini
+setup.cfg
+tox.ini
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Configuration (keep example)
+config/config.yaml
+.env
+.env.local
+
+# Scripts (keep only essential ones)
+scripts/cleanup.py
