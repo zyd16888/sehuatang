@@ -1,35 +1,45 @@
 import random
 import time
-from typing import Optional, Dict, Any
+import threading
+from typing import Optional, Dict, Any, List
+from queue import Queue, Empty
 from DrissionPage import ChromiumOptions, WebPage
 from util.log_util import log
 from util.config import domain, proxy_enable, proxy_url
 from util.read_config import get_config
-from util.exceptions import handle_exceptions, ExceptionHandler
 
 
 class BrowserAutomation:
     """
     浏览器自动化类
     负责管理浏览器实例和页面操作
+    支持多标签页并发抓取
     """
 
-    def __init__(self, proxy_enable: bool = False, proxy_url: Optional[str] = None):
+    def __init__(self, proxy_enable: bool = False, proxy_url: Optional[str] = None, max_tabs: int = 3):
         """
         初始化浏览器自动化实例
 
         Args:
             proxy_enable: 是否启用代理
             proxy_url: 代理URL
+            max_tabs: 最大标签页数量，默认3个
         """
         self.page_instance: Optional[WebPage] = None
         self.proxy_enable = proxy_enable
         self.proxy_url = proxy_url
+        self.max_tabs = max_tabs
+
+        # 多标签页管理
+        self.tab_pool: Queue = Queue()
+        self.active_tabs: List[WebPage] = []
+        self.tab_lock = threading.Lock()
+        self._tabs_initialized = False
 
         # 从配置文件获取浏览器配置
         self.browser_config = self._load_browser_config()
 
-        # 初始化浏览器页面
+        # 初始化浏览器页面（保持向后兼容）
         try:
             self.initialize_page()
         except Exception as e:
@@ -71,23 +81,9 @@ class BrowserAutomation:
             return default_config
 
     def initialize_page(self) -> None:
-        """初始化浏览器页面实例"""
+        """初始化浏览器页面实例（单页面模式，保持向后兼容）"""
         if self.page_instance is None:
-            co = ChromiumOptions()
-
-            # 设置代理
-            if self.proxy_enable and self.proxy_url:
-                log.debug(f"启用代理: {self.proxy_url}")
-                co.set_proxy(self.proxy_url)
-
-            # 设置User-Agent
-            co.set_user_agent(self.browser_config["user_agent"])
-
-            # 添加浏览器参数
-            for arg in self.browser_config["arguments"]:
-                co.set_argument(arg)
-
-            log.debug(f"浏览器选项配置完成: {co.arguments}")
+            co = self._create_chromium_options()
 
             # 创建WebPage实例
             try:
@@ -96,6 +92,274 @@ class BrowserAutomation:
             except Exception as e:
                 log.error(f"初始化WebPage实例失败: {e}")
                 raise
+
+    def _create_chromium_options(self) -> ChromiumOptions:
+        """创建Chromium选项配置"""
+        co = ChromiumOptions()
+
+        # 设置代理
+        if self.proxy_enable and self.proxy_url:
+            log.debug(f"启用代理: {self.proxy_url}")
+            co.set_proxy(self.proxy_url)
+
+        # 设置User-Agent
+        co.set_user_agent(self.browser_config["user_agent"])
+
+        # 添加浏览器参数
+        for arg in self.browser_config["arguments"]:
+            co.set_argument(arg)
+
+        log.debug(f"浏览器选项配置完成: {co.arguments}")
+        return co
+
+    def initialize_tabs(self) -> None:
+        """初始化多标签页"""
+        if self._tabs_initialized:
+            return
+
+        with self.tab_lock:
+            if self._tabs_initialized:
+                return
+
+            try:
+                # 创建主浏览器实例
+                co = self._create_chromium_options()
+                main_page = WebPage(chromium_options=co)
+
+                # 创建多个标签页
+                for i in range(self.max_tabs):
+                    if i == 0:
+                        # 第一个标签页就是主页面
+                        tab = main_page
+                    else:
+                        # 创建新标签页
+                        tab = main_page.new_tab()
+
+                    self.active_tabs.append(tab)
+                    self.tab_pool.put(tab)
+
+                self._tabs_initialized = True
+                log.info(f"成功初始化 {self.max_tabs} 个标签页")
+
+            except Exception as e:
+                log.error(f"初始化多标签页失败: {e}")
+                # 清理已创建的标签页
+                self._cleanup_tabs()
+                raise
+
+    def _get_available_tab(self, timeout: float = 30.0) -> Optional[WebPage]:
+        """
+        获取可用的标签页
+
+        Args:
+            timeout: 等待超时时间（秒）
+
+        Returns:
+            可用的标签页实例，超时返回None
+        """
+        try:
+            return self.tab_pool.get(timeout=timeout)
+        except Empty:
+            log.warning(f"获取标签页超时 ({timeout}秒)")
+            return None
+
+    def _return_tab(self, tab: WebPage) -> None:
+        """
+        归还标签页到池中
+
+        Args:
+            tab: 要归还的标签页
+        """
+        try:
+            self.tab_pool.put(tab, timeout=1.0)
+        except Exception as e:
+            log.error(f"归还标签页失败: {e}")
+
+    def _cleanup_tabs(self) -> None:
+        """清理所有标签页"""
+        try:
+            # 清空队列
+            while not self.tab_pool.empty():
+                try:
+                    self.tab_pool.get_nowait()
+                except Empty:
+                    break
+
+            # 关闭所有活动标签页
+            for tab in self.active_tabs:
+                try:
+                    if hasattr(tab, 'quit'):
+                        tab.quit()
+                except Exception as e:
+                    log.error(f"关闭标签页时出错: {e}")
+
+            self.active_tabs.clear()
+            self._tabs_initialized = False
+            log.debug("所有标签页已清理")
+
+        except Exception as e:
+            log.error(f"清理标签页时出错: {e}")
+
+    def get_page_html_multi_tab(self, url: str, max_retries: Optional[int] = None, tab_timeout: float = 30.0) -> str:
+        """
+        使用多标签页获取页面HTML内容
+
+        Args:
+            url: 目标URL
+            max_retries: 最大重试次数，None时使用配置值
+            tab_timeout: 获取标签页的超时时间
+
+        Returns:
+            页面HTML内容，失败时返回空字符串
+        """
+        # 确保多标签页已初始化
+        if not self._tabs_initialized:
+            self.initialize_tabs()
+
+        if max_retries is None:
+            max_retries = self.browser_config["max_retries"]
+
+        retry_count = 0
+
+        while retry_count < max_retries:
+            tab = None
+            try:
+                # 获取可用标签页
+                tab = self._get_available_tab(tab_timeout)
+                if tab is None:
+                    log.error(f"无法获取可用标签页，URL: {url}")
+                    return ""
+
+                # 使用标签页访问页面
+                html_content = self._get_page_html_with_tab(tab, url)
+                return html_content
+
+            except Exception as e:
+                retry_count += 1
+                log.error(
+                    f"使用多标签页获取页面时出错 (重试 {retry_count}/{max_retries}): {e}")
+
+                if retry_count >= max_retries:
+                    log.error(f"达到最大重试次数 ({max_retries})，返回空HTML")
+                    return ""
+
+            finally:
+                # 归还标签页
+                if tab is not None:
+                    self._return_tab(tab)
+
+        return ""
+
+    def _get_page_html_with_tab(self, tab: WebPage, url: str) -> str:
+        """
+        使用指定标签页获取页面HTML
+
+        Args:
+            tab: 标签页实例
+            url: 目标URL
+
+        Returns:
+            页面HTML内容
+        """
+        # 访问页面
+        tab.get(url)
+        log.debug(f"标签页访问页面: {url}")
+
+        # 随机等待时间
+        sleep_range = self.browser_config["sleep_range"]
+        sleep_duration = random.uniform(sleep_range[0], sleep_range[1])
+        time.sleep(sleep_duration)
+
+        # 处理特殊页面情况
+        self._handle_special_pages_for_tab(tab)
+
+        # 获取并返回HTML内容
+        return self._get_html_content_from_tab(tab)
+
+    def _handle_special_pages_for_tab(self, tab: WebPage) -> None:
+        """处理特殊页面情况（标签页版本）"""
+        try:
+            page_title = tab.title
+            log.debug(f"标签页页面标题: {page_title}")
+
+            # 处理Cloudflare验证
+            if page_title == "Just a moment...":
+                self._handle_cloudflare_challenge_for_tab(tab)
+
+            # 处理域名入口页面
+            if page_title == domain.upper():
+                self._handle_domain_entrance_for_tab(tab)
+
+        except Exception as e:
+            log.error(f"处理特殊页面时出错: {e}")
+
+    def _handle_cloudflare_challenge_for_tab(self, tab: WebPage) -> None:
+        """处理Cloudflare验证（标签页版本）"""
+        log.debug("标签页检测到Cloudflare验证，开始处理")
+
+        try:
+            # 获取验证框架
+            frame = tab.get_frame(
+                '@src^https://challenges.cloudflare.com/cdn-cgi')
+
+            # 等待验证元素加载
+            timeout = self.browser_config["cloudflare_timeout"]
+            tab.wait.eles_loaded('.cb-i', timeout=timeout)
+            time.sleep(3)
+
+            # 点击验证按钮
+            checkbox = frame.ele('.cb-i')
+            checkbox.click()
+
+            # 等待页面加载
+            tab.wait.load_start()
+            time.sleep(5)
+
+            log.debug("标签页Cloudflare验证处理完成")
+
+        except Exception as e:
+            log.error(f"处理标签页Cloudflare验证时出错: {e}")
+            raise
+
+    def _handle_domain_entrance_for_tab(self, tab: WebPage) -> None:
+        """处理域名入口页面（标签页版本）"""
+        log.debug("标签页检测到域名入口页面，尝试点击进入")
+
+        try:
+            enter_button = tab.ele('.enter-btn')
+
+            if enter_button:
+                log.debug(f"标签页找到入口按钮: {enter_button.html}")
+                time.sleep(1)
+                enter_button.click()
+                time.sleep(3)
+                log.debug("标签页成功点击入口按钮")
+            else:
+                log.warning("标签页未找到入口按钮")
+
+        except Exception as e:
+            log.error(f"处理标签页域名入口页面时出错: {e}")
+            raise
+
+    def _get_html_content_from_tab(self, tab: WebPage) -> str:
+        """
+        从标签页获取HTML内容
+
+        Args:
+            tab: 标签页实例
+
+        Returns:
+            页面HTML内容
+        """
+        try:
+            page_html = tab.html
+            current_title = tab.title
+            log.debug(f"成功从标签页获取HTML，当前标题: {current_title}")
+            return page_html
+
+        except Exception as e:
+            log.error(f"从标签页获取HTML时出错: {e}")
+            raise
 
     def get_page_html(self, url: str, max_retries: Optional[int] = None) -> str:
         """
@@ -245,6 +509,11 @@ class BrowserAutomation:
 
     def close_page(self) -> None:
         """安全关闭页面实例"""
+        # 清理多标签页
+        if self._tabs_initialized:
+            self._cleanup_tabs()
+
+        # 关闭单页面实例（保持向后兼容）
         if self.page_instance is not None:
             try:
                 self.page_instance.quit()
@@ -253,6 +522,53 @@ class BrowserAutomation:
                 log.error(f"关闭浏览器页面时出错: {e}")
             finally:
                 self.page_instance = None
+
+    def get_multiple_pages_html(self, urls: List[str], max_retries: Optional[int] = None) -> List[str]:
+        """
+        批量获取多个页面的HTML内容（使用多标签页）
+
+        Args:
+            urls: URL列表
+            max_retries: 最大重试次数
+
+        Returns:
+            HTML内容列表，与输入URL列表对应
+        """
+        if not urls:
+            return []
+
+        # 确保多标签页已初始化
+        if not self._tabs_initialized:
+            self.initialize_tabs()
+
+        results = []
+
+        # 使用线程池处理多个URL
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_tabs) as executor:
+            # 提交所有任务
+            future_to_url = {
+                executor.submit(self.get_page_html_multi_tab, url, max_retries): url
+                for url in urls
+            }
+
+            # 收集结果（保持顺序）
+            url_to_result = {}
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    html = future.result()
+                    url_to_result[url] = html
+                except Exception as e:
+                    log.error(f"获取页面 {url} 时出错: {e}")
+                    url_to_result[url] = ""
+
+            # 按原始顺序返回结果
+            results = [url_to_result.get(url, "") for url in urls]
+
+        log.info(f"批量获取 {len(urls)} 个页面完成，成功 {sum(1 for r in results if r)} 个")
+        return results
 
     def is_page_active(self) -> bool:
         """
@@ -311,13 +627,31 @@ class BrowserAutomation:
 
 # 示例用法
 if __name__ == "__main__":
-    # 使用上下文管理器（推荐）
+    # 单页面模式（向后兼容）
+    print("=== 单页面模式示例 ===")
     with BrowserAutomation(proxy_enable=proxy_enable, proxy_url=proxy_url) as browser:
         url = "https://sehuatang.org"
         html = browser.get_page_html(url)
         print(f"页面标题: {browser.get_page_title()}")
         print(f"当前URL: {browser.get_current_url()}")
         print(f"HTML长度: {len(html)}")
+
+    # 多标签页模式示例
+    print("\n=== 多标签页模式示例 ===")
+    with BrowserAutomation(proxy_enable=proxy_enable, proxy_url=proxy_url, max_tabs=3) as browser:
+        # 单个页面使用多标签页
+        url = "https://sehuatang.org"
+        html = browser.get_page_html_multi_tab(url)
+        print(f"多标签页HTML长度: {len(html)}")
+
+        # 批量获取多个页面
+        urls = [
+            "https://sehuatang.org/forum-103-1.html",
+            "https://sehuatang.org/forum-103-2.html",
+            "https://sehuatang.org/forum-104-1.html"
+        ]
+        html_list = browser.get_multiple_pages_html(urls)
+        print(f"批量获取结果: {[len(html) for html in html_list]}")
 
     # 传统用法（仍然支持）
     # browser = BrowserAutomation(proxy_enable=proxy_enable, proxy_url=proxy_url)

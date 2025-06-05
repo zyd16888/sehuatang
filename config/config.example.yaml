@@ -83,3 +83,30 @@ performance:
   request_timeout: 30
   retry_attempts: 3
   retry_delay: 5
+
+
+# 浏览器配置
+browser:
+  # 多标签页配置
+  max_tabs: 3  # 最大标签页数量，建议2-5个，过多可能导致内存占用过高
+  tab_timeout: 30  # 获取标签页的超时时间（秒）
+  enable_multi_tab: true  # 是否启用多标签页模式，false则使用传统单页面模式
+
+  # 浏览器基础配置
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  max_retries: 3  # 页面加载失败时的最大重试次数
+  sleep_range: [2, 4]  # 页面加载后的随机等待时间范围（秒）
+  page_load_timeout: 30  # 页面加载超时时间（秒）
+  cloudflare_timeout: 10  # Cloudflare验证超时时间（秒）
+
+  # 浏览器启动参数（高级配置）
+  arguments:
+    - "--headless=new"              # 无头浏览器模式
+    - "--no-sandbox"                # Docker环境必需
+    - "--disable-dev-shm-usage"     # 禁用/dev/shm使用
+    - "--disable-gpu"               # 禁用GPU加速
+    - "--disable-extensions"        # 禁用扩展
+    - "--disable-setuid-sandbox"    # 禁用setuid沙盒
+    - "--remote-debugging-port=9222" # 远程调试端口
+    - "--disable-web-security"      # 禁用Web安全
+    - "--ignore-certificate-errors" # 忽略证书错误

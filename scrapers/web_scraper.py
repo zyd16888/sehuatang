@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 from drissio import BrowserAutomation
 from util.log_util import log
 from util.config import domain, page_num, date, proxy, proxy_enable
+from util.read_config import get_config
 from .page_parser import PageParser
 from .data_processor import DataProcessor
 from .data_manager import DataManager
@@ -19,8 +20,23 @@ class WebScraper:
 
     def __init__(self):
         self.log = log
+
+        # 从配置文件获取浏览器配置
+        browser_config = get_config("browser", {})
+        max_tabs = browser_config.get("max_tabs", 3)
+        enable_multi_tab = browser_config.get("enable_multi_tab", True)
+
+        # 初始化浏览器自动化实例
         self.browser = BrowserAutomation(
-            proxy_enable=proxy_enable, proxy_url=proxy)
+            proxy_enable=proxy_enable,
+            proxy_url=proxy,
+            max_tabs=max_tabs
+        )
+
+        # 存储配置
+        self.enable_multi_tab = enable_multi_tab
+        self.max_tabs = max_tabs
+
         self.page_parser = PageParser()
         self.data_processor = DataProcessor()
         self.data_manager = DataManager()
@@ -83,34 +99,59 @@ class WebScraper:
     async def _get_plate_info_batch(self, fid: int) -> tuple[List[Dict[str, Any]], List[str]]:
         """
         批量获取板块页面信息
-        
+
         Args:
             fid: 板块ID
-            
+
         Returns:
             tuple: (帖子信息列表, 帖子ID列表)
         """
         start_time = time.time()
 
-        # 创建异步任务
-        tasks = [
-            self._get_plate_info(fid, page)
-            for page in range(1, page_num + 1)
-        ]
+        if self.enable_multi_tab:
+            # 使用多标签页批量获取
+            urls = [
+                f"https://{domain}/forum-{fid}-{page}.html" for page in range(1, page_num + 1)]
+            html_responses = self.browser.get_multiple_pages_html(urls)
 
-        # 执行异步任务
-        results = await asyncio.gather(*tasks)
+            # 解析所有页面
+            all_info_list = []
+            all_tid_list = []
+
+            for page, html_response in enumerate(html_responses, 1):
+                if html_response:
+                    try:
+                        info_list, tid_list = self.page_parser.parse_plate_page(
+                            html_response, date())
+                        all_info_list.extend(info_list)
+                        all_tid_list.extend(tid_list)
+                        self.log.info(
+                            f"成功解析板块 {fid} 第 {page} 页，获得 {len(info_list)} 个帖子")
+                    except Exception as e:
+                        self.log.error(f"解析板块 {fid} 第 {page} 页时出错: {e}")
+                else:
+                    self.log.warning(f"获取板块 {fid} 第 {page} 页内容失败")
+        else:
+            # 使用原有的异步方式
+            tasks = [
+                self._get_plate_info(fid, page)
+                for page in range(1, page_num + 1)
+            ]
+
+            # 执行异步任务
+            results = await asyncio.gather(*tasks)
+
+            # 合并结果
+            all_info_list = []
+            all_tid_list = []
+
+            for info_list, tid_list in results:
+                all_info_list.extend(info_list)
+                all_tid_list.extend(tid_list)
 
         end_time = time.time()
-        self.log.info(f"get_plate_info 执行时间: {end_time - start_time:.2f}秒")
-
-        # 合并结果
-        all_info_list = []
-        all_tid_list = []
-
-        for info_list, tid_list in results:
-            all_info_list.extend(info_list)
-            all_tid_list.extend(tid_list)
+        self.log.info(
+            f"get_plate_info 执行时间: {end_time - start_time:.2f}秒，模式: {'多标签页' if self.enable_multi_tab else '异步'}")
 
         return all_info_list, all_tid_list
 
@@ -153,17 +194,45 @@ class WebScraper:
         """
         start_time = time.time()
 
-        # 创建异步任务
-        tasks = [
-            self._get_thread_detail(info["tid"], info)
-            for info in info_list
-        ]
+        if self.enable_multi_tab:
+            # 使用多标签页批量获取
+            urls = [
+                f"https://{domain}/?mod=viewthread&tid={info['tid']}" for info in info_list]
+            html_responses = self.browser.get_multiple_pages_html(urls)
 
-        # 执行异步任务
-        results = await asyncio.gather(*tasks)
+            # 解析所有页面
+            results = []
+            for i, html_response in enumerate(html_responses):
+                if html_response:
+                    try:
+                        detailed_data = self.page_parser.parse_thread_page(
+                            html_response)
+                        if detailed_data:
+                            results.append((detailed_data, info_list[i]))
+                            self.log.debug(f"成功解析帖子 {info_list[i]['tid']}")
+                        else:
+                            results.append(None)
+                            self.log.warning(
+                                f"解析帖子页面失败: {info_list[i]['tid']}")
+                    except Exception as e:
+                        self.log.error(f"解析帖子 {info_list[i]['tid']} 时出错: {e}")
+                        results.append(None)
+                else:
+                    self.log.warning(f"获取帖子页面内容失败: {info_list[i]['tid']}")
+                    results.append(None)
+        else:
+            # 使用原有的异步方式
+            tasks = [
+                self._get_thread_detail(info["tid"], info)
+                for info in info_list
+            ]
+
+            # 执行异步任务
+            results = await asyncio.gather(*tasks)
 
         end_time = time.time()
-        self.log.info(f"get_thread_details 执行时间: {end_time - start_time:.2f}秒")
+        self.log.info(
+            f"get_thread_details 执行时间: {end_time - start_time:.2f}秒，模式: {'多标签页' if self.enable_multi_tab else '异步'}")
 
         # 处理结果
         detailed_data = self.data_processor.merge_thread_data(
