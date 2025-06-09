@@ -79,7 +79,7 @@ class DataProcessor:
         Returns:
             是否有效
         """
-        required_fields = ["title", "tid", "post_time"]
+        required_fields = ["tid", "post_time", "magnet"]
 
         for field in required_fields:
             if field not in data_item or not data_item[field]:
