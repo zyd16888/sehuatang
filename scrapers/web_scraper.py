@@ -282,6 +282,7 @@ class WebScraper:
         try:
             self.log.debug(f"浏览主页: {domain}")
             html_response = self.browser.get_page_html(f"https://{domain}")
+            log.debug(f"主页内容: {html_response}")
 
             if html_response:
                 log.debug("主页内容获取成功")
