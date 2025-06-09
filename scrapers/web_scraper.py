@@ -280,26 +280,108 @@ class WebScraper:
             是否成功初始化
         """
         try:
-            self.log.debug(f"浏览主页: {domain}")
-            html_response = self.browser.get_page_html(f"https://{domain}")
-            log.debug(f"主页内容: {html_response}")
+            self.log.info(f"开始初始化主页: {domain}")
 
-            if html_response:
-                log.debug("主页内容获取成功")
-                log.debug(f"xxxxxx: {domain.upper()}, {html_response.title()}")
-                # 简单验证页面是否正常加载
-                if domain.upper() in html_response or "forum" in html_response.lower():
-                    self.log.info("主页初始化成功")
-                    return True
-                else:
-                    self.log.warning("主页内容异常")
-                    return False
+            # 尝试多次获取主页内容
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                self.log.info(f"第 {attempt}/{max_attempts} 次尝试获取主页内容")
+
+                try:
+                    html_response = self.browser.get_page_html(
+                        f"https://{domain}")
+
+                    # 详细记录响应信息
+                    if html_response:
+                        html_length = len(html_response)
+                        self.log.info(f"获取到HTML内容，长度: {html_length} 字符")
+
+                        # 记录HTML内容的前500个字符用于调试
+                        preview = html_response[:500] if len(
+                            html_response) > 500 else html_response
+                        self.log.debug(f"HTML内容预览: {preview}")
+
+                        # 检查页面内容是否有效
+                        if self._validate_homepage_content(html_response):
+                            self.log.info("主页初始化成功")
+                            return True
+                        else:
+                            self.log.warning(f"第 {attempt} 次尝试：主页内容验证失败")
+                            if attempt < max_attempts:
+                                self.log.info("等待3秒后重试...")
+                                time.sleep(3)
+                                continue
+                    else:
+                        self.log.warning(f"第 {attempt} 次尝试：获取到空的HTML内容")
+                        if attempt < max_attempts:
+                            self.log.info("等待3秒后重试...")
+                            time.sleep(3)
+                            continue
+
+                except Exception as e:
+                    self.log.error(f"第 {attempt} 次尝试获取主页时出错: {e}")
+                    if attempt < max_attempts:
+                        self.log.info("等待3秒后重试...")
+                        time.sleep(3)
+                        continue
+
+            self.log.error(f"经过 {max_attempts} 次尝试，仍无法成功初始化主页")
+            return False
+
+        except Exception as e:
+            self.log.error(f"初始化主页时发生未预期的错误: {e}")
+            return False
+
+    def _validate_homepage_content(self, html_content: str) -> bool:
+        """
+        验证主页内容是否有效
+
+        Args:
+            html_content: HTML内容
+
+        Returns:
+            是否有效
+        """
+        try:
+            if not html_content or len(html_content.strip()) < 100:
+                self.log.warning("HTML内容过短，可能无效")
+                return False
+
+            # 转换为小写进行检查
+            html_lower = html_content.lower()
+            domain_lower = domain.lower()
+
+            # 检查多个验证条件
+            validation_checks = [
+                domain_lower in html_lower,
+                "forum" in html_lower,
+                "<html" in html_lower,
+                "<body" in html_lower,
+                "sehuatang" in html_lower
+            ]
+
+            passed_checks = sum(validation_checks)
+            self.log.debug(f"内容验证结果: {passed_checks}/5 项检查通过")
+
+            # 至少需要通过2项检查
+            if passed_checks >= 2:
+                self.log.info("主页内容验证通过")
+                return True
             else:
-                self.log.error("无法获取主页内容")
+                self.log.warning(f"主页内容验证失败，仅通过 {passed_checks}/5 项检查")
+                # 记录更多调试信息
+                self.log.debug(f"检查结果详情:")
+                self.log.debug(
+                    f"- 包含域名 '{domain_lower}': {domain_lower in html_lower}")
+                self.log.debug(f"- 包含 'forum': {'forum' in html_lower}")
+                self.log.debug(f"- 包含 '<html': {'<html' in html_lower}")
+                self.log.debug(f"- 包含 '<body': {'<body' in html_lower}")
+                self.log.debug(
+                    f"- 包含 'sehuatang': {'sehuatang' in html_lower}")
                 return False
 
         except Exception as e:
-            self.log.error(f"初始化主页时出错: {e}")
+            self.log.error(f"验证主页内容时出错: {e}")
             return False
 
     def close(self):

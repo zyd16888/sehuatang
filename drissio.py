@@ -1,3 +1,4 @@
+import os
 import random
 import time
 import threading
@@ -58,6 +59,56 @@ class BrowserAutomation:
             log.error(f"初始化浏览器页面失败: {e}")
             raise
 
+    def _is_running_in_docker(self) -> bool:
+        """检测是否在Docker环境中运行"""
+        try:
+            # 检查/.dockerenv文件
+            if os.path.exists('/.dockerenv'):
+                return True
+
+            # 检查/proc/1/cgroup文件
+            if os.path.exists('/proc/1/cgroup'):
+                with open('/proc/1/cgroup', 'r') as f:
+                    content = f.read()
+                    if 'docker' in content or 'containerd' in content:
+                        return True
+
+            # 检查环境变量
+            if os.getenv('DOCKER_CONTAINER') or os.getenv('KUBERNETES_SERVICE_HOST'):
+                return True
+
+            return False
+        except Exception:
+            return False
+
+    def _test_network_connectivity(self, url: str) -> bool:
+        """
+        测试网络连接性
+
+        Args:
+            url: 要测试的URL
+
+        Returns:
+            是否可以连接
+        """
+        try:
+            import urllib.request
+            import socket
+
+            # 设置超时时间
+            socket.setdefaulttimeout(10)
+
+            # 尝试连接
+            response = urllib.request.urlopen(url, timeout=10)
+            status_code = response.getcode()
+
+            log.info(f"网络连接测试成功: {url}, 状态码: {status_code}")
+            return status_code == 200
+
+        except Exception as e:
+            log.error(f"网络连接测试失败: {url}, 错误: {e}")
+            return False
+
     def _load_browser_config(self) -> Dict[str, Any]:
         """
         从配置文件加载浏览器配置
@@ -65,27 +116,70 @@ class BrowserAutomation:
         Returns:
             浏览器配置字典
         """
+        # 检测是否在Docker环境中运行
+        is_docker = self._is_running_in_docker()
+        log.info(f"检测到运行环境: {'Docker容器' if is_docker else '标准环境'}")
+
+        # Docker环境专用配置
+        docker_arguments = [
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-setuid-sandbox",
+            "--remote-debugging-port=9222",
+            "--disable-web-security",
+            "--ignore-certificate-errors",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-features=TranslateUI",
+            "--disable-ipc-flooding-protection",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-sync",
+            "--disable-translate",
+            "--hide-scrollbars",
+            "--metrics-recording-only",
+            "--mute-audio",
+            "--no-first-run",
+            "--safebrowsing-disable-auto-update",
+            "--disable-client-side-phishing-detection",
+            "--disable-component-update",
+            "--disable-domain-reliability",
+            "--disable-features=VizDisplayCompositor",
+            "--run-all-compositor-stages-before-draw",
+            "--disable-features=AudioServiceOutOfProcess",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=VizDisplayCompositor",
+            "--window-size=1920,1080"
+        ]
+
+        # 标准环境配置
+        standard_arguments = [
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-setuid-sandbox",
+            "--remote-debugging-port=9222",
+            "--disable-web-security",
+            "--ignore-certificate-errors"
+        ]
+
         default_config = {
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "max_retries": 3,
+            "max_retries": 5 if is_docker else 3,  # Docker环境增加重试次数
             "sleep_range": [3, 5],  # 保留作为备用，但优先使用智能等待
-            "page_load_timeout": 30,
-            "cloudflare_timeout": 10,
+            "page_load_timeout": 45 if is_docker else 30,  # Docker环境增加超时时间
+            "cloudflare_timeout": 15 if is_docker else 10,
             "wait_strategy": "smart",  # 等待策略: "smart"(智能等待) 或 "random"(随机等待)
-            "doc_load_timeout": 15,  # 文档加载超时时间
-            "min_wait_time": 1,  # 最小等待时间（秒）
-            "max_wait_time": 3,  # 最大等待时间（秒）
-            "arguments": [
-                "--headless=new",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--disable-setuid-sandbox",
-                "--remote-debugging-port=9222",
-                "--disable-web-security",
-                "--ignore-certificate-errors"
-            ]
+            "doc_load_timeout": 25 if is_docker else 15,  # Docker环境增加文档加载超时时间
+            "min_wait_time": 2 if is_docker else 1,  # Docker环境增加最小等待时间
+            "max_wait_time": 5 if is_docker else 3,  # Docker环境增加最大等待时间
+            "arguments": docker_arguments if is_docker else standard_arguments
         }
 
         try:
@@ -542,12 +636,22 @@ class BrowserAutomation:
         if max_retries is None:
             max_retries = self.browser_config["max_retries"]
 
+        # 在Docker环境中进行网络连接测试
+        if self._is_running_in_docker():
+            log.info(f"Docker环境检测到，进行网络连接测试: {url}")
+            if not self._test_network_connectivity(url):
+                log.error(f"网络连接测试失败，无法访问: {url}")
+                return ""
+
         retry_count = 0
 
         while retry_count < max_retries:
             try:
+                log.info(f"开始获取页面 (尝试 {retry_count + 1}/{max_retries}): {url}")
+
                 # 确保页面实例存在
                 if self.page_instance is None:
+                    log.debug("页面实例不存在，正在初始化...")
                     self.initialize_page()
 
                 # 访问页面
@@ -557,7 +661,14 @@ class BrowserAutomation:
                 self._handle_special_pages()
 
                 # 获取并返回HTML内容
-                return self._get_html_content()
+                html_content = self._get_html_content()
+
+                if html_content:
+                    log.info(f"成功获取页面内容: {url}")
+                    return html_content
+                else:
+                    log.warning(f"获取到空的页面内容: {url}")
+                    raise Exception("获取到空的HTML内容")
 
             except Exception as e:
                 retry_count += 1
@@ -569,6 +680,11 @@ class BrowserAutomation:
                 if retry_count >= max_retries:
                     log.error(f"达到最大重试次数 ({max_retries})，返回空HTML")
                     return ""
+                else:
+                    # 在重试前等待一段时间
+                    wait_time = retry_count * 2  # 递增等待时间
+                    log.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
 
         return ""
 
@@ -662,14 +778,52 @@ class BrowserAutomation:
             页面HTML内容
         """
         try:
+            # 检查页面实例状态
+            if self.page_instance is None:
+                log.error("页面实例为None，无法获取HTML内容")
+                return ""
+
+            # 尝试获取页面信息
+            try:
+                current_url = self.page_instance.url
+                current_title = self.page_instance.title
+                log.debug(f"当前页面URL: {current_url}, 标题: {current_title}")
+            except Exception as e:
+                log.warning(f"获取页面基本信息时出错: {e}")
+
+            # 获取HTML内容
             page_html = self.page_instance.html
-            current_title = self.page_instance.title
-            log.debug(f"成功获取页面HTML，当前标题: {current_title}")
-            return page_html
+
+            if page_html:
+                html_length = len(page_html)
+                log.debug(f"成功获取页面HTML，长度: {html_length} 字符")
+
+                # 检查HTML内容是否有效
+                if html_length < 100:
+                    log.warning(f"HTML内容过短 ({html_length} 字符)，可能获取失败")
+                elif "<html" not in page_html.lower():
+                    log.warning("HTML内容不包含<html标签，可能不是有效的HTML")
+
+                return page_html
+            else:
+                log.error("获取到空的HTML内容")
+                return ""
 
         except Exception as e:
             log.error(f"获取页面HTML时出错: {e}")
-            raise
+            # 尝试获取更多调试信息
+            try:
+                if self.page_instance:
+                    log.debug(f"页面实例状态: 存在")
+                    try:
+                        log.debug(f"页面URL: {self.page_instance.url}")
+                    except:
+                        log.debug("无法获取页面URL")
+                else:
+                    log.debug("页面实例状态: None")
+            except:
+                pass
+            return ""
 
     def _reset_browser_instance(self) -> None:
         """重置浏览器实例"""

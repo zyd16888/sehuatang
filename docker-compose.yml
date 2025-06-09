@@ -10,6 +10,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai
+      - DOCKER_CONTAINER=true
+      - RUN_MODE=scheduler
+      - PYTHONPATH=/app
       # 可以通过环境变量覆盖配置
       # - SHT_MONGODB_ENABLE=true
       # - SHT_PROXY_PROXY_ENABLE=false
@@ -26,11 +29,11 @@ services:
 
     # 健康检查
     healthcheck:
-      test: ["CMD", "python", "run.py", "--mode", "health"]
+      test: ["CMD", "python", "docker_run.py"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 3
-      start_period: 60s
+      start_period: 120s
 
     # 资源限制
     deploy:
@@ -50,7 +53,7 @@ services:
         max-file: "3"
 
     # 默认命令
-    command: ["python", "run.py"]
+    command: ["python", "docker_run.py"]
 
   # Telegram Bot (可选，使用 --profile bot 启动)
   telegram-bot:

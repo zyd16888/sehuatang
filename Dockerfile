@@ -71,8 +71,8 @@ LABEL org.opencontainers.image.revision=${REVISION}
 LABEL org.opencontainers.image.licenses="MIT"
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python run.py --mode health || exit 1
+HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
+    CMD python docker_run.py || exit 1
 
 # 切换到非root用户
 # USER appuser
@@ -80,5 +80,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # 暴露端口（如果需要）
 EXPOSE 8080
 
+# 设置Docker环境标识
+ENV DOCKER_CONTAINER=true
+ENV RUN_MODE=scheduler
+
 # 默认命令
-CMD ["python", "run.py"]
+CMD ["python", "docker_run.py"]
