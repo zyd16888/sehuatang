@@ -14,6 +14,18 @@ class BrowserAutomation:
     浏览器自动化类
     负责管理浏览器实例和页面操作
     支持多标签页并发抓取
+
+    新增功能：
+    - 智能页面加载等待：替换随机等待为基于页面状态的智能等待
+    - 可配置等待策略：支持"smart"(智能等待)和"random"(随机等待)两种模式
+    - Cloudflare验证优化：智能检测验证完成状态
+    - 页面导航等待：自动检测页面跳转完成
+
+    配置参数：
+    - wait_strategy: "smart" | "random" - 等待策略
+    - doc_load_timeout: 文档加载超时时间（秒）
+    - min_wait_time: 最小等待时间（秒）
+    - max_wait_time: 最大等待时间（秒）
     """
 
     def __init__(self, proxy_enable: bool = False, proxy_url: Optional[str] = None, max_tabs: int = 3):
@@ -56,9 +68,13 @@ class BrowserAutomation:
         default_config = {
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "max_retries": 3,
-            "sleep_range": [3, 5],
+            "sleep_range": [3, 5],  # 保留作为备用，但优先使用智能等待
             "page_load_timeout": 30,
             "cloudflare_timeout": 10,
+            "wait_strategy": "smart",  # 等待策略: "smart"(智能等待) 或 "random"(随机等待)
+            "doc_load_timeout": 15,  # 文档加载超时时间
+            "min_wait_time": 1,  # 最小等待时间（秒）
+            "max_wait_time": 3,  # 最大等待时间（秒）
             "arguments": [
                 "--headless=new",
                 "--no-sandbox",
@@ -111,6 +127,155 @@ class BrowserAutomation:
 
         log.debug(f"浏览器选项配置完成: {co.arguments}")
         return co
+
+    def _wait_for_page_load(self, page: WebPage, url: str) -> None:
+        """
+        智能等待页面加载完成
+
+        Args:
+            page: 页面实例
+            url: 访问的URL，用于日志记录
+        """
+        wait_strategy = self.browser_config.get("wait_strategy", "smart")
+
+        if wait_strategy == "smart":
+            self._smart_wait_for_page_load(page, url)
+        else:
+            self._random_wait_for_page_load()
+
+    def _smart_wait_for_page_load(self, page: WebPage, url: str) -> None:
+        """
+        智能等待页面加载完成
+
+        Args:
+            page: 页面实例
+            url: 访问的URL，用于日志记录
+        """
+        try:
+            doc_timeout = self.browser_config.get("doc_load_timeout", 15)
+            min_wait = self.browser_config.get("min_wait_time", 1)
+            max_wait = self.browser_config.get("max_wait_time", 3)
+
+            log.debug(f"开始智能等待页面加载: {url}")
+
+            # 等待文档加载完成
+            try:
+                page.wait.doc_loaded(timeout=doc_timeout)
+                log.debug(f"文档加载完成: {url}")
+            except Exception as e:
+                log.warning(f"等待文档加载超时，继续执行: {e}")
+
+            # 检查页面标题是否已加载
+            title_loaded = False
+            for _ in range(5):  # 最多检查5次
+                try:
+                    title = page.title
+                    if title and title.strip() and title != "":
+                        title_loaded = True
+                        log.debug(f"页面标题已加载: {title}")
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
+            if not title_loaded:
+                log.warning(f"页面标题未能正常加载: {url}")
+
+            # 最小等待时间，确保页面稳定
+            wait_time = random.uniform(min_wait, max_wait)
+            time.sleep(wait_time)
+            log.debug(f"智能等待完成，总等待时间: {wait_time:.2f}秒")
+
+        except Exception as e:
+            log.error(f"智能等待过程中出错: {e}，回退到随机等待")
+            self._random_wait_for_page_load()
+
+    def _random_wait_for_page_load(self) -> None:
+        """
+        随机等待页面加载（备用方案）
+        """
+        sleep_range = self.browser_config["sleep_range"]
+        sleep_duration = random.uniform(sleep_range[0], sleep_range[1])
+        time.sleep(sleep_duration)
+        log.debug(f"随机等待完成: {sleep_duration:.2f}秒")
+
+    def _wait_for_cloudflare_completion(self, page: WebPage) -> None:
+        """
+        等待Cloudflare验证完成
+
+        Args:
+            page: 页面实例
+        """
+        try:
+            max_wait_time = 15  # 最大等待15秒
+            check_interval = 0.5  # 每0.5秒检查一次
+            elapsed_time = 0
+
+            log.debug("开始等待Cloudflare验证完成")
+
+            while elapsed_time < max_wait_time:
+                try:
+                    current_title = page.title
+                    # 如果标题不再是"Just a moment..."，说明验证完成
+                    if current_title and current_title != "Just a moment...":
+                        log.debug(f"Cloudflare验证完成，新标题: {current_title}")
+                        time.sleep(1)  # 额外等待1秒确保页面稳定
+                        return
+                except Exception:
+                    pass
+
+                time.sleep(check_interval)
+                elapsed_time += check_interval
+
+            log.warning(f"Cloudflare验证等待超时 ({max_wait_time}秒)")
+
+        except Exception as e:
+            log.error(f"等待Cloudflare验证完成时出错: {e}")
+            time.sleep(3)  # 回退到固定等待
+
+    def _wait_for_page_navigation(self, page: WebPage) -> None:
+        """
+        等待页面导航完成
+
+        Args:
+            page: 页面实例
+        """
+        try:
+            max_wait_time = 10  # 最大等待10秒
+            check_interval = 0.5  # 每0.5秒检查一次
+            elapsed_time = 0
+
+            log.debug("开始等待页面导航完成")
+
+            # 记录初始URL
+            try:
+                initial_url = page.url
+            except Exception:
+                initial_url = None
+
+            while elapsed_time < max_wait_time:
+                try:
+                    current_url = page.url
+                    current_title = page.title
+
+                    # 检查URL是否发生变化或标题是否已加载
+                    if (current_url and current_url != initial_url) or \
+                       (current_title and current_title.strip() and current_title != domain.upper()):
+                        log.debug(
+                            f"页面导航完成，新URL: {current_url}, 新标题: {current_title}")
+                        time.sleep(0.5)  # 额外等待0.5秒确保页面稳定
+                        return
+                except Exception:
+                    pass
+
+                time.sleep(check_interval)
+                elapsed_time += check_interval
+
+            log.warning(f"页面导航等待超时 ({max_wait_time}秒)")
+
+        except Exception as e:
+            log.error(f"等待页面导航完成时出错: {e}")
+            time.sleep(2)  # 回退到固定等待
 
     def initialize_tabs(self) -> None:
         """初始化多标签页"""
@@ -265,10 +430,8 @@ class BrowserAutomation:
         tab.get(url)
         log.debug(f"标签页访问页面: {url}")
 
-        # 随机等待时间
-        sleep_range = self.browser_config["sleep_range"]
-        sleep_duration = random.uniform(sleep_range[0], sleep_range[1])
-        time.sleep(sleep_duration)
+        # 智能等待页面加载完成
+        self._wait_for_page_load(tab, url)
 
         # 处理特殊页面情况
         self._handle_special_pages_for_tab(tab)
@@ -305,15 +468,17 @@ class BrowserAutomation:
             # 等待验证元素加载
             timeout = self.browser_config["cloudflare_timeout"]
             tab.wait.eles_loaded('.cb-i', timeout=timeout)
-            time.sleep(3)
+            time.sleep(2)  # 减少固定等待时间
 
             # 点击验证按钮
             checkbox = frame.ele('.cb-i')
             checkbox.click()
 
-            # 等待页面加载
+            # 等待页面开始加载
             tab.wait.load_start()
-            time.sleep(5)
+
+            # 智能等待验证完成
+            self._wait_for_cloudflare_completion(tab)
 
             log.debug("标签页Cloudflare验证处理完成")
 
@@ -330,9 +495,11 @@ class BrowserAutomation:
 
             if enter_button:
                 log.debug(f"标签页找到入口按钮: {enter_button.html}")
-                time.sleep(1)
+                time.sleep(0.5)  # 减少等待时间
                 enter_button.click()
-                time.sleep(3)
+
+                # 等待页面跳转完成
+                self._wait_for_page_navigation(tab)
                 log.debug("标签页成功点击入口按钮")
             else:
                 log.warning("标签页未找到入口按钮")
@@ -415,10 +582,8 @@ class BrowserAutomation:
         self.page_instance.get(url)
         log.debug(f"访问页面: {url}")
 
-        # 随机等待时间
-        sleep_range = self.browser_config["sleep_range"]
-        sleep_duration = random.uniform(sleep_range[0], sleep_range[1])
-        time.sleep(sleep_duration)
+        # 智能等待页面加载完成
+        self._wait_for_page_load(self.page_instance, url)
 
     def _handle_special_pages(self) -> None:
         """处理特殊页面情况（Cloudflare验证、入口页面等）"""
@@ -449,15 +614,17 @@ class BrowserAutomation:
             # 等待验证元素加载
             timeout = self.browser_config["cloudflare_timeout"]
             self.page_instance.wait.eles_loaded('.cb-i', timeout=timeout)
-            time.sleep(3)
+            time.sleep(2)  # 减少固定等待时间
 
             # 点击验证按钮
             checkbox = frame.ele('.cb-i')
             checkbox.click()
 
-            # 等待页面加载
+            # 等待页面开始加载
             self.page_instance.wait.load_start()
-            time.sleep(5)
+
+            # 智能等待验证完成
+            self._wait_for_cloudflare_completion(self.page_instance)
 
             log.debug("Cloudflare验证处理完成")
 
@@ -474,9 +641,11 @@ class BrowserAutomation:
 
             if enter_button:
                 log.debug(f"找到入口按钮: {enter_button.html}")
-                time.sleep(1)
+                time.sleep(0.5)  # 减少等待时间
                 enter_button.click()
-                time.sleep(3)
+
+                # 等待页面跳转完成
+                self._wait_for_page_navigation(self.page_instance)
                 log.debug("成功点击入口按钮")
             else:
                 log.warning("未找到入口按钮")

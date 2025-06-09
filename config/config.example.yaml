@@ -92,6 +92,15 @@ browser:
   tab_timeout: 30  # 获取标签页的超时时间（秒）
   enable_multi_tab: true  # 是否启用多标签页模式，false则使用传统单页面模式
 
+  # 智能等待配置（新功能）
+  wait_strategy: "smart"  # 等待策略: "smart"(智能等待) 或 "random"(随机等待)
+  doc_load_timeout: 15    # 文档加载超时时间（秒），建议10-20秒
+  min_wait_time: 1        # 最小等待时间（秒），确保页面稳定
+  max_wait_time: 3        # 最大等待时间（秒），平衡速度和稳定性
+
+  # 传统等待配置（备用）
+  sleep_range: [3, 5]     # 随机等待时间范围（秒），仅在wait_strategy为"random"时使用
+
   # 浏览器基础配置
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
   max_retries: 3  # 页面加载失败时的最大重试次数
