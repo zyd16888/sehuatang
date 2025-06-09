@@ -284,6 +284,8 @@ class WebScraper:
             html_response = self.browser.get_page_html(f"https://{domain}")
 
             if html_response:
+                log.debug("主页内容获取成功")
+                log.debug(f"xxxxxx: {domain.upper()}, {html_response.title()}")
                 # 简单验证页面是否正常加载
                 if domain.upper() in html_response or "forum" in html_response.lower():
                     self.log.info("主页初始化成功")
