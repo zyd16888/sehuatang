@@ -84,6 +84,7 @@ class DataProcessor:
         for field in required_fields:
             if field not in data_item or not data_item[field]:
                 self.log.warning(f"数据项缺少必要字段 {field}")
+                self.log.warning(f"无效数据项: {data_item}")
                 return False
 
         return True
