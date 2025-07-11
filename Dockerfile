@@ -71,8 +71,8 @@ LABEL org.opencontainers.image.revision=${REVISION}
 LABEL org.opencontainers.image.licenses="MIT"
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
-    CMD python docker_run.py || exit 1
+# HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
+#     CMD python docker_run.py || exit 1
 
 # 切换到非root用户
 # USER appuser
