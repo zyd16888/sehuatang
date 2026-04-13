@@ -1,4 +1,5 @@
 import time
+import os
 import random
 import threading
 from queue import Queue, Empty
@@ -38,18 +39,23 @@ class BrowserAutomation:
         self.cfg = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
-        """加载基础配置"""
+        """加载配置 - 适配 Docker 无头模式"""
         is_docker = False
-        try:
-            import os
-            if os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER'):
-                is_docker = True
-        except:
-            pass
+        if os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true':
+            is_docker = True
 
-        base_args = [
-            "--no-sandbox", "--disable-extensions"
-        ]
+        # 基础参数
+        base_args = ["--no-sandbox", "--disable-extensions"]
+
+        # Docker 专用配置
+        if is_docker:
+            # 在 Docker 中必须开启无头模式
+            base_args.extend([
+                "--headless=new",
+                "--disable-gpu",
+                "--disable-dev-shm-usage"
+            ])
+            log.info("Docker 环境：已强制开启 Headless 模式")
 
         return {
             "timeout": 45 if is_docker else 30,

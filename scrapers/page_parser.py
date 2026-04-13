@@ -2,6 +2,7 @@
 页面解析器模块
 负责解析HTML页面，提取所需数据
 """
+import html
 import re
 from typing import List, Dict, Any, Optional
 import bs4
@@ -13,6 +14,15 @@ class PageParser:
     
     def __init__(self):
         self.log = log
+
+        self._magnet_re = re.compile(
+            r"magnet:\?xt=urn:btih:[A-Za-z0-9]{32,40}(?:[A-Za-z0-9&=%._+:/-]*)",
+            re.IGNORECASE,
+        )
+        self._link_115_re = re.compile(
+            r"(115://[A-Za-z0-9+/=]+|https?://(?:115\.com|115cdn\.com)/[^\s\"'<>]+)",
+            re.IGNORECASE,
+        )
     
     def parse_plate_page(self, html_content: str, date_time: str) -> tuple[List[Dict[str, Any]], List[str]]:
         """
@@ -118,8 +128,8 @@ class PageParser:
                 return None
             title = title_element.find("span").get_text()
             
-            # 获取帖子内容
-            info_element = soup.find("td", class_="t_f")
+            # 获取首帖内容，避免回帖/引用干扰
+            info_element = self._get_primary_post_element(soup)
             if not info_element:
                 return None
                 
@@ -130,8 +140,8 @@ class PageParser:
                     img_list.append(img.attrs["file"])
             
             # 提取磁力链接
-            magnet = self._extract_magnet_link(soup)
-            magnet_115 = self._extract_115_link(soup)
+            magnet = self._extract_magnet_link(info_element)
+            magnet_115 = self._extract_115_link(info_element)
             
             # 提取发布时间
             post_time = self._extract_post_time(soup)
@@ -148,24 +158,45 @@ class PageParser:
             self.log.error(f"解析帖子页面时出错: {e}")
             return None
     
-    def _extract_magnet_link(self, soup) -> Optional[str]:
+    def _get_primary_post_element(self, soup):
+        """获取首帖正文元素"""
+        try:
+            post_list = soup.find("div", id="postlist")
+            if post_list:
+                info_element = post_list.find("td", class_="t_f")
+                if info_element:
+                    return info_element
+            return soup.find("td", class_="t_f")
+        except Exception as e:
+            self.log.error(f"获取首帖内容时出错: {e}")
+            return None
+
+    def _extract_magnet_link(self, content_root) -> Optional[str]:
         """提取磁力链接"""
         try:
-            blockcode = soup.find("div", class_="blockcode")
-            if blockcode and blockcode.find("li"):
-                return blockcode.find("li").get_text()
+            link_candidates = self._extract_magnets_from_links(content_root)
+            code_candidates = self._extract_magnets_from_blockcode(content_root)
+            text_candidates = self._extract_magnets_from_text(
+                content_root.get_text(" ", strip=True)
+            )
+            return self._pick_first_candidate(
+                [link_candidates, code_candidates, text_candidates]
+            )
         except Exception as e:
             self.log.error(f"提取磁力链接时出错: {e}")
         return None
     
-    def _extract_115_link(self, soup) -> Optional[str]:
+    def _extract_115_link(self, content_root) -> Optional[str]:
         """提取115链接"""
         try:
-            blockcode = soup.find("div", class_="blockcode")
-            if blockcode:
-                next_blockcode = blockcode.find_next("div", class_="blockcode")
-                if next_blockcode and next_blockcode.find("li"):
-                    return next_blockcode.find("li").get_text()
+            link_candidates = self._extract_115_from_links(content_root)
+            code_candidates = self._extract_115_from_blockcode(content_root)
+            text_candidates = self._extract_115_from_text(
+                content_root.get_text(" ", strip=True)
+            )
+            return self._pick_first_candidate(
+                [link_candidates, code_candidates, text_candidates]
+            )
         except Exception as e:
             self.log.error(f"提取115链接时出错: {e}")
         return None
@@ -184,3 +215,76 @@ class PageParser:
         except Exception as e:
             self.log.error(f"提取发布时间时出错: {e}")
             return None
+
+    def _clean_candidate_text(self, text: str) -> str:
+        """清理候选文本，去掉转义和HTML标签"""
+        if not text:
+            return ""
+        cleaned = html.unescape(text).strip()
+        if "<" in cleaned and ">" in cleaned:
+            try:
+                cleaned = bs4.BeautifulSoup(cleaned, "html.parser").get_text(
+                    " ", strip=True
+                )
+            except Exception:
+                pass
+        return cleaned.strip()
+
+    def _strip_trailing_punct(self, text: str) -> str:
+        return text.rstrip(").,，。;；:!?]}>\"'")
+
+    def _extract_magnets_from_links(self, content_root) -> List[str]:
+        magnets = []
+        for anchor in content_root.find_all("a", href=True):
+            href = anchor["href"].strip()
+            if href.lower().startswith("magnet:?"):
+                magnets.extend(self._extract_magnets_from_text(href))
+        return magnets
+
+    def _extract_magnets_from_blockcode(self, content_root) -> List[str]:
+        magnets = []
+        for node in content_root.select("div.blockcode li, div.blockcode code"):
+            magnets.extend(
+                self._extract_magnets_from_text(node.get_text(" ", strip=True))
+            )
+        return magnets
+
+    def _extract_magnets_from_text(self, text: str) -> List[str]:
+        cleaned = self._clean_candidate_text(text)
+        if not cleaned:
+            return []
+        matches = self._magnet_re.findall(cleaned)
+        return [self._strip_trailing_punct(m) for m in matches]
+
+    def _extract_115_from_links(self, content_root) -> List[str]:
+        links = []
+        for anchor in content_root.find_all("a", href=True):
+            href = anchor["href"].strip()
+            if href.lower().startswith("115://") or "115.com" in href:
+                links.extend(self._extract_115_from_text(href))
+        return links
+
+    def _extract_115_from_blockcode(self, content_root) -> List[str]:
+        links = []
+        for node in content_root.select("div.blockcode li, div.blockcode code"):
+            links.extend(
+                self._extract_115_from_text(node.get_text(" ", strip=True))
+            )
+        return links
+
+    def _extract_115_from_text(self, text: str) -> List[str]:
+        cleaned = self._clean_candidate_text(text)
+        if not cleaned:
+            return []
+        matches = self._link_115_re.findall(cleaned)
+        return [self._strip_trailing_punct(m) for m in matches]
+
+    def _pick_first_candidate(self, candidate_groups: List[List[str]]) -> Optional[str]:
+        seen = set()
+        for group in candidate_groups:
+            for item in group:
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                return item
+        return None
