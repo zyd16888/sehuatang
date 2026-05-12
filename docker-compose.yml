@@ -13,9 +13,8 @@ services:
       - DOCKER_CONTAINER=true
       - RUN_MODE=scheduler
       - PYTHONPATH=/app
-      # 可以通过环境变量覆盖配置
-      # - SHT_MONGODB_ENABLE=true
-      # - SHT_PROXY_PROXY_ENABLE=false
+      # 启用 CF 过盾时取消下行注释（同时配置 flaresolverr profile）
+      # - SHT_HTTP_CLIENT_FLARESOLVERR_URL=http://flaresolverr:8191/v1
 
     # 挂载卷
     volumes:
@@ -27,23 +26,15 @@ services:
     networks:
       - crawler_network
 
-    # 健康检查
-    # healthcheck:
-    #   test: ["CMD", "python", "docker_run.py"]
-    #   interval: 30s
-    #   timeout: 15s
-    #   retries: 3
-    #   start_period: 120s
-
-    # 资源限制
+    # 资源限制（HTTP 抓取无需大内存）
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 256M
           cpus: '0.5'
         reservations:
-          memory: 512M
-          cpus: '0.25'
+          memory: 64M
+          cpus: '0.1'
 
     # 日志配置
     logging:
@@ -54,6 +45,20 @@ services:
 
     # 默认命令
     command: ["python", "docker_run.py"]
+
+  # CF 过盾服务（仅在遇到 Cloudflare 挑战时需要，用 --profile flaresolverr 启动）
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    profiles: ["flaresolverr"]
+    environment:
+      - LOG_LEVEL=info
+      - TZ=Asia/Shanghai
+    ports:
+      - "8191:8191"
+    networks:
+      - crawler_network
 
   # Telegram Bot (可选，使用 --profile bot 启动)
   telegram-bot:

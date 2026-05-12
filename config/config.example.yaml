@@ -41,6 +41,16 @@ proxy:
   # 是否使用代理
   proxy_enable: true
 
+# HTTP 抓取配置（curl_cffi）
+http_client:
+  # 并发抓取线程数（列表/详情共用）
+  concurrent_workers: 6
+  # 单次请求超时（秒）
+  request_timeout: 15
+  # FlareSolverr 服务地址，遇到 Cloudflare 时自动过盾，留空则放弃当次抓取
+  # 例：http://localhost:8191/v1
+  flaresolverr_url: ""
+
 sendMessage:
   # 企业微信推送
   send_wecom_enable: false
