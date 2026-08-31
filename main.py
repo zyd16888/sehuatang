@@ -44,5 +44,28 @@ async def main():
     log.info("所有板块处理完成，程序结束")
 
 
+async def backfill(year: int, fids=None, resume: bool = False) -> bool:
+    """按年份补抓历史数据；未指定板块时使用配置中的全部板块。"""
+    selected_fids = list(fids) if fids else list(fid_list)
+    success = True
+    log.info(f"开始执行 {year} 年历史补抓，板块: {selected_fids}")
+
+    with WebScraper(target_date=str(year)) as scraper:
+        for fid in selected_fids:
+            try:
+                summary = await scraper.backfill_forum_section(
+                    fid,
+                    year,
+                    resume=resume,
+                )
+                log.info(f"板块 {fid} 的 {year} 年历史补抓完成: {summary}")
+            except Exception as e:
+                success = False
+                log.error(f"板块 {fid} 的 {year} 年历史补抓失败: {e}")
+
+    log.info(f"{year} 年历史补抓任务结束")
+    return success
+
+
 if __name__ == "__main__":
     asyncio.run(main())

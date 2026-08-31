@@ -67,7 +67,20 @@ python run.py --mode health
 
 # 详细输出模式
 python run.py --verbose
+
+# 补抓指定年份，未传 --fid 时使用配置文件中的全部板块
+python run.py --mode backfill --year 2025
+
+# 只补抓指定板块；--fid 可以重复传入
+python run.py --mode backfill --year 2025 --fid 103 --fid 104
+
+# 从上次完成的分页批次继续
+python run.py --mode backfill --year 2025 --resume
 ```
+
+年度补抓会按主题发布时间排序，通过二分查找定位目标年份的页码范围，
+再分批抓取并按 tid 去重写库。进度保存在 data/backfill_progress.json，
+历史补抓默认不发送 Telegram 通知。
 
 ## 🐳 Docker部署
 

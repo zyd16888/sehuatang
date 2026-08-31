@@ -1,5 +1,3 @@
-import time
-
 import pymysql
 
 from util.log_util import TNLog
@@ -56,7 +54,7 @@ class SaveToMysql:
             self.conn.rollback()
 
     def compare_tid(self, tid_list, fid, info_list):
-        id_list = self.find_tid(fid)
+        id_list = self.find_tid(fid, tid_list)
         tid_list_new = []
         for i in tid_list:
             if i not in id_list:
@@ -69,20 +67,20 @@ class SaveToMysql:
 
         return tid_list_new, info_list_new
 
-    def find_tid(self, fid):
-        date = get_config("date")
-        if date is None:
-            date = time.strftime("%Y-%m-%d", time.localtime())
-        else:
-            date = date.__str__()
-        sql = "select tid from sht_data where fid = %s and date = '%s'" % (fid, date)
-        self.cursor.execute(sql)
+    def find_tid(self, fid, tid_list=None):
+        params = [fid]
+        sql = "select tid from sht_data where fid = %s"
+        if tid_list:
+            placeholders = ", ".join(["%s"] * len(tid_list))
+            sql += f" and tid in ({placeholders})"
+            params.extend(tid_list)
+        self.cursor.execute(sql, params)
         res = self.cursor.fetchall()
         tid_list = [str(i[0]) for i in res]
         return tid_list
 
     def filter_data(self, data_list, fid):
-        id_list = self.find_tid(fid)
+        id_list = self.find_tid(fid, [item["tid"] for item in data_list])
         data_list_new = []
         for data in data_list:
             if data["tid"] not in id_list:

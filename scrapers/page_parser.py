@@ -35,32 +35,59 @@ class PageParser:
         Returns:
             tuple: (帖子信息列表, 帖子ID列表)
         """
+        all_info = self.parse_plate_page_all(html_content)
+        info_list = [
+            item for item in all_info
+            if str(item.get("date", "")).startswith(date_time)
+        ]
+        tid_list = [item["tid"] for item in info_list]
+        return info_list, tid_list
+
+    def parse_plate_page_all(self, html_content: str) -> List[Dict[str, Any]]:
+        """解析列表页中的全部普通主题，不做日期过滤。"""
         info_list = []
-        tid_list = []
-        
         try:
             soup = bs4.BeautifulSoup(html_content, "html.parser")
             all_threads = soup.find_all(id=re.compile("^normalthread_"))
-            
             for thread in all_threads:
-                data = self._extract_thread_info(thread, date_time)
+                data = self._extract_thread_info(thread)
                 if data:
                     info_list.append(data)
-                    tid_list.append(data["tid"])
-                    
         except Exception as e:
             self.log.error(f"解析板块页面时出错: {e}")
-            
-        return info_list, tid_list
+        return info_list
+
+    def parse_last_page(self, html_content: str) -> int:
+        """从 Discuz 分页栏提取最后一页页码。"""
+        try:
+            soup = bs4.BeautifulSoup(html_content, "html.parser")
+            page_numbers = []
+            current_page = soup.select_one("div.pg strong")
+            if current_page and current_page.get_text(strip=True).isdigit():
+                page_numbers.append(int(current_page.get_text(strip=True)))
+
+            for anchor in soup.select("div.pg a[href]"):
+                href = anchor.get("href", "")
+                matches = re.findall(
+                    r"(?:[?&]page=|forum-\d+-)(\d+)",
+                    href,
+                )
+                page_numbers.extend(int(value) for value in matches)
+
+                text_numbers = re.findall(r"\d+", anchor.get_text(" ", strip=True))
+                page_numbers.extend(int(value) for value in text_numbers)
+
+            return max(page_numbers, default=1)
+        except Exception as e:
+            self.log.error(f"解析板块最后页码时出错: {e}")
+            return 1
     
-    def _extract_thread_info(self, thread_element, date_time: str) -> Optional[Dict[str, Any]]:
+    def _extract_thread_info(self, thread_element) -> Optional[Dict[str, Any]]:
         """
         从线程元素中提取信息
         
         Args:
             thread_element: BeautifulSoup元素
-            date_time: 目标日期
-            
         Returns:
             帖子信息字典或None
         """
@@ -76,17 +103,16 @@ class PageParser:
             title = " ".join(title_list)
             
             # 提取日期
-            date_td_em = thread_element.find("td", class_="by").find("em")
-            date_span = date_td_em.find("span", attrs={"title": re.compile("^" + date_time)})
-            
+            date_td = thread_element.find("td", class_="by")
+            date_td_em = date_td.find("em") if date_td else None
+            if not date_td_em:
+                return None
+
+            date_span = date_td_em.find("span", attrs={"title": True})
             if date_span is not None:
-                date = date_span.attrs["title"]
+                date = date_span.get("title")
             else:
-                flag = date_td_em.get_text().startswith(date_time)
-                if flag:
-                    date = date_td_em.get_text()
-                else:
-                    return None
+                date = date_td_em.get_text(" ", strip=True)
                     
             if date is None:
                 return None

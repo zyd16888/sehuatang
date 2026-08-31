@@ -9,6 +9,7 @@ import sys
 import time
 import signal
 import argparse
+import datetime
 from pathlib import Path
 
 # 添加项目根目录到Python路径
@@ -86,6 +87,18 @@ class ApplicationRunner:
             ExceptionHandler.handle_and_log(e, "运行调度器时出错")
             return False
 
+    def run_backfill(self, year, fids, resume=False):
+        """按年份运行一次历史补抓任务。"""
+        try:
+            import asyncio
+            from main import backfill as backfill_task
+
+            log.info(f"开始执行 {year} 年历史补抓任务")
+            return asyncio.run(backfill_task(year, fids, resume=resume))
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "执行历史补抓任务时出错")
+            return False
+
     def run_bot(self):
         """运行Telegram Bot"""
         try:
@@ -139,18 +152,22 @@ def create_argument_parser():
   once      - 单次执行模式
   bot       - Telegram Bot模式
   health    - 健康检查模式
+  backfill  - 按年份补抓历史数据
 
 示例:
   python run.py                    # 运行调度器
   python run.py --mode once        # 执行一次任务
   python run.py --mode bot         # 运行Telegram Bot
   python run.py --mode health      # 健康检查
+  python run.py --mode backfill --year 2025
+  python run.py --mode backfill --year 2025 --fid 103 --fid 104
+  python run.py --mode backfill --year 2025 --resume
         """
     )
 
     parser.add_argument(
         "--mode",
-        choices=["scheduler", "once", "bot", "health"],
+        choices=["scheduler", "once", "bot", "health", "backfill"],
         default="scheduler",
         help="运行模式 (默认: scheduler)"
     )
@@ -161,6 +178,25 @@ def create_argument_parser():
         help="详细输出模式"
     )
 
+    parser.add_argument(
+        "--year",
+        type=int,
+        help="历史补抓年份，仅用于 backfill 模式"
+    )
+
+    parser.add_argument(
+        "--fid",
+        type=int,
+        action="append",
+        help="历史补抓板块 ID，可重复指定；不传则使用配置文件中的全部板块"
+    )
+
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="从年度补抓检查点继续，仅用于 backfill 模式"
+    )
+
     return parser
 
 
@@ -169,6 +205,23 @@ def main():
     # 解析命令行参数
     parser = create_argument_parser()
     args = parser.parse_args()
+
+    if args.mode == "backfill":
+        if args.year is None:
+            parser.error("backfill 模式必须指定 --year")
+        current_year = datetime.date.today().year
+        if args.year < 1900 or args.year > current_year:
+            parser.error(f"--year 必须在 1900-{current_year} 之间")
+
+        if args.fid:
+            from util.config import fid_list
+
+            configured_fids = {int(fid) for fid in fid_list}
+            unknown_fids = sorted(set(args.fid) - configured_fids)
+            if unknown_fids:
+                parser.error(
+                    f"板块 {unknown_fids} 不在配置文件的 fid 列表中"
+                )
 
     # 设置日志级别
     if args.verbose:
@@ -185,6 +238,8 @@ def main():
             success = runner.run_bot()
         elif args.mode == "health":
             success = runner.health_check()
+        elif args.mode == "backfill":
+            success = runner.run_backfill(args.year, args.fid, args.resume)
         else:  # scheduler
             success = runner.run_scheduler()
 

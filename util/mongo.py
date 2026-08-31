@@ -59,7 +59,10 @@ def save_data(data_list, fid):
 
 def filter_data(data_list, fid):     # 过滤数据
     collection_name = get_plate_name(fid)
-    tid_list = find_data_tid(collection_name, date())
+    tid_list = find_existing_tids(
+        collection_name,
+        [item["tid"] for item in data_list],
+    )
     data_list_new = compare_data(data_list, tid_list)
     return data_list_new
 
@@ -82,6 +85,25 @@ def find_data_tid(collection_name, date):
     return tid_list
 
 
+def find_existing_tids(collection_name, tid_list):
+    """只查询候选列表中已存在的 tid，不依赖抓取日期。"""
+    if not tid_list:
+        return []
+
+    normalized_tids = {str(tid) for tid in tid_list}
+    query_values = list(normalized_tids)
+    query_values.extend(
+        int(tid) for tid in normalized_tids if tid.isdigit()
+    )
+
+    collection = db[collection_name]
+    res = collection.find(
+        {"tid": {"$in": query_values}},
+        {"_id": 0, "tid": 1},
+    )
+    return [str(item["tid"]) for item in res]
+
+
 # 比对tid，将不存在的信息筛选出来
 def compare_data(data_list, id_list):
     """
@@ -97,7 +119,7 @@ def compare_data(data_list, id_list):
 # 筛选不存在的tids
 def compare_tid(tid_list, fid, info_list):
     collection_name = get_plate_name(fid)
-    id_list = find_data_tid(collection_name, date())
+    id_list = find_existing_tids(collection_name, tid_list)
     log.info("collection_name: {}".format(collection_name))
     log.info(f"mongodb 查询到{len(id_list)}条数据, id为：{' '.join(id_list)}")
 

@@ -3,7 +3,7 @@
 负责数据的过滤、转换和验证
 """
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from util.log_util import log
 from util.config import date
 
@@ -11,8 +11,9 @@ from util.config import date
 class DataProcessor:
     """数据处理器类"""
 
-    def __init__(self):
+    def __init__(self, target_date: Optional[str] = None):
         self.log = log
+        self.target_date = target_date
 
     def merge_thread_data(self, thread_details: List[tuple], _: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -63,7 +64,7 @@ class DataProcessor:
             是否匹配
         """
         try:
-            target_date = date()
+            target_date = self.target_date or date()
             return bool(re.match("^" + target_date, post_time))
         except Exception as e:
             self.log.error(f"验证发布时间时出错: {e}")
