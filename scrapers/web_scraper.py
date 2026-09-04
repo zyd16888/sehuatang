@@ -5,31 +5,42 @@ Web 爬虫核心模块（HTTP 版）
 """
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as calendar_date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from util.log_util import log
-from util.config import date, domain, page_num
+from util.config import date, domain, mongodb_enable, page_num
 from util.read_config import get_config
 
 from .data_manager import DataManager
 from .data_processor import DataProcessor
-from .http_client import http_client
+from .http_client import HttpClient
 from .notification_manager import NotificationManager
 from .page_parser import PageParser
+from .core.contracts import CrawlFailure
+from .infrastructure import build_failure_store
 
 
 class WebScraper:
     """Web 爬虫主类"""
 
-    def __init__(self, target_date: Optional[str] = None):
+    def __init__(
+        self,
+        target_date: Optional[str] = None,
+        dry_run: bool = False,
+        failure_store=None,
+    ):
         self.log = log
-        self.http = http_client
-        self.workers = int(get_config("concurrent_workers", 6) or 6)
+        self.http = HttpClient()
+        self.workers = self.http.settings.concurrency
         self.target_date = target_date
+        self.dry_run = dry_run
+        self.failure_store = failure_store or build_failure_store(
+            mongodb_enabled=bool(mongodb_enable)
+        )
 
         self.page_parser = PageParser()
         self.data_processor = DataProcessor(target_date)
@@ -65,8 +76,17 @@ class WebScraper:
             self.log.info(f"本次抓取的数据条数为: {len(detailed_data_list)}")
 
             self.log.info("开始写入数据库")
-            filtered_data = self.data_manager.filter_and_save_data(detailed_data_list, fid)
+            filtered_data = self.data_manager.filter_and_save_data(
+                detailed_data_list,
+                fid,
+                strict=True,
+                dry_run=self.dry_run,
+            )
+            if not self.dry_run:
+                self._clear_detail_failures(detailed_data_list)
 
+            if self.dry_run:
+                return f"dry-run：发现 {len(filtered_data)} 条新数据"
             return self.notification_manager.send_notifications(filtered_data, fid)
         except Exception as e:
             self.log.error(f"爬取板块 {fid} 时出错: {e}")
@@ -123,7 +143,7 @@ class WebScraper:
             return summary
 
         batch_size = max(1, self.workers)
-        checkpoint_enabled = True
+        checkpoint_enabled = not self.dry_run
 
         for batch_start in range(start_page, end_page + 1, batch_size):
             pages = list(
@@ -175,8 +195,11 @@ class WebScraper:
                 detailed_data,
                 fid,
                 strict=True,
+                dry_run=self.dry_run,
             )
             summary["records_saved"] += len(saved_data)
+            if not self.dry_run:
+                self._clear_detail_failures(detailed_data)
             if checkpoint_enabled:
                 self._save_backfill_checkpoint(year, fid, pages[-1])
             self.log.info(
@@ -267,6 +290,8 @@ class WebScraper:
                 continue
             try:
                 info_list, tid_list = self.page_parser.parse_plate_page(body, target_date)
+                for info in info_list:
+                    info["fid"] = fid
                 all_info.extend(info_list)
                 all_tids.extend(tid_list)
                 self.log.info(f"成功解析板块 {fid} 第 {page} 页，获得 {len(info_list)} 个帖子")
@@ -400,11 +425,20 @@ class WebScraper:
         responses = self._fetch_many(urls)
 
         results: List[Optional[tuple]] = []
+        failures = []
         for i, body in enumerate(responses):
             tid = info_list[i]["tid"]
             if not body:
                 self.log.warning(f"获取帖子页面内容失败: {tid}")
                 results.append(None)
+                failures.append(
+                    self._detail_failure(
+                        info_list[i],
+                        urls[i],
+                        "fetch",
+                        "request_failed",
+                    )
+                )
                 continue
             try:
                 detail = self.page_parser.parse_thread_page(body)
@@ -414,16 +448,118 @@ class WebScraper:
                 else:
                     results.append(None)
                     self.log.warning(f"解析帖子页面失败: {tid}")
+                    failures.append(
+                        self._detail_failure(
+                            info_list[i],
+                            urls[i],
+                            "parse",
+                            "invalid_document",
+                        )
+                    )
             except Exception as e:
                 self.log.error(f"解析帖子 {tid} 时出错: {e}")
                 results.append(None)
+                failures.append(
+                    self._detail_failure(
+                        info_list[i],
+                        urls[i],
+                        "parse",
+                        type(e).__name__.lower(),
+                        str(e),
+                    )
+                )
 
         self.log.info(f"_get_thread_details_batch 执行时间: {time.time() - t0:.2f}秒")
 
         merged = self.data_processor.merge_thread_data(results, info_list)
         cleaned_data = self.data_processor.clean_data(merged)
-        failure_count = sum(result is None for result in results)
+        cleaned_tids = {str(item.get("tid")) for item in cleaned_data}
+        for result in results:
+            if result is None:
+                continue
+            _, basic_info = result
+            if str(basic_info.get("tid")) in cleaned_tids:
+                continue
+            tid = str(basic_info["tid"])
+            failures.append(
+                self._detail_failure(
+                    basic_info,
+                    f"https://{domain}/forum.php?mod=viewthread&tid={tid}",
+                    "validate",
+                    "invalid_record",
+                )
+            )
+
+        if failures and not self.dry_run:
+            try:
+                self.failure_store.record(failures)
+            except Exception as e:
+                self.log.error(f"Sehuatang 失败台账写入失败: {e}")
+
+        failure_count = len(failures)
         return cleaned_data, failure_count
+
+    def retry_failed_details(self) -> Dict[str, int]:
+        targets = self.failure_store.due_targets("sehuatang")
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        for target in targets:
+            metadata = dict(target.metadata)
+            fid = int(metadata.get("fid") or target.partition or 0)
+            if not fid or not metadata.get("tid"):
+                self.log.warning(f"失败目标缺少 fid/tid，跳过: {target.key}")
+                continue
+            grouped.setdefault(fid, []).append(metadata)
+
+        summary = {
+            "requested": sum(len(items) for items in grouped.values()),
+            "failed": 0,
+            "saved": 0,
+        }
+        for fid, info_list in grouped.items():
+            detailed_data, failure_count = self._get_thread_details_batch_result(
+                info_list
+            )
+            summary["failed"] += failure_count
+            if not detailed_data:
+                continue
+            saved_data = self.data_manager.filter_and_save_data(
+                detailed_data,
+                fid,
+                strict=True,
+                dry_run=self.dry_run,
+            )
+            summary["saved"] += len(saved_data)
+            if not self.dry_run:
+                self._clear_detail_failures(detailed_data)
+        return summary
+
+    def _detail_failure(
+        self,
+        info: Dict[str, Any],
+        url: str,
+        stage: str,
+        error_type: str,
+        error_message: str = "",
+    ) -> CrawlFailure:
+        return CrawlFailure(
+            source="sehuatang",
+            key=str(info["tid"]),
+            url=url,
+            stage=stage,
+            attempts=self.http.settings.retry.attempts,
+            error_type=error_type,
+            error_message=error_message,
+            metadata=dict(info),
+        )
+
+    def _clear_detail_failures(self, data_list: List[Dict[str, Any]]) -> None:
+        keys = [str(item["tid"]) for item in data_list if item.get("tid")]
+        if not keys:
+            return
+        try:
+            self.failure_store.clear("sehuatang", keys)
+        except Exception as e:
+            self.log.error(f"Sehuatang 失败台账清理失败: {e}")
 
     def _fetch_many(self, urls: List[str]) -> List[Optional[bytes]]:
         """按输入顺序返回结果。同一 URL 失败位置为 None。"""
@@ -432,7 +568,7 @@ class WebScraper:
         results: List[Optional[bytes]] = [None] * len(urls)
         with ThreadPoolExecutor(max_workers=min(self.workers, len(urls))) as pool:
             futures = {pool.submit(self.http.get_html, u): i for i, u in enumerate(urls)}
-            for fut in futures:
+            for fut in as_completed(futures):
                 idx = futures[fut]
                 try:
                     results[idx] = fut.result()

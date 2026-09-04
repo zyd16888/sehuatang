@@ -1,117 +1,144 @@
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
-from urllib.parse import urljoin
 
-from curl_cffi import requests
-
+from scrapers.core.config import load_source_settings
+from scrapers.core.contracts import NullFailureStore
+from scrapers.core.engine import CrawlEngine
+from scrapers.core.http import CrawlerHttpClient
+from scrapers.core.models import FetchResult
+from scrapers.infrastructure import build_failure_store
+from scrapers.sources.javbee import JavbeeRepository, JavbeeSource
 from util.log_util import log
-from util.mongo import find_existing_javbee_urls, save_javbee_items
+from util.mongo import (
+    find_existing_javbee_urls,
+    find_stale_javbee_urls,
+    save_javbee_items,
+)
 from util.read_config import get_config
 
 from .javbee_parser import JavbeeParser
 
 
-class JavbeeScraper:
-    """独立的 Javbee 数据源爬虫，共用项目调度、日志和 MongoDB。"""
+class _CallableHttpAdapter:
+    """把旧测试/调用方的 bytes getter 适配为公共 HTTP 结果。"""
 
-    def __init__(self, config=None, http_get=None):
-        self.config = config or get_config("javbee", {})
-        self.base_url = str(self.config.get("base_url", "https://javbee.co")).rstrip("/")
+    def __init__(self, getter, concurrency: int):
+        self.getter = getter
+        self.concurrency = concurrency
+
+    def fetch(self, url: str, stage: str = "detail") -> FetchResult:
+        started = time.monotonic()
+        try:
+            body = self.getter(url)
+            return FetchResult(
+                url=url,
+                body=body,
+                status_code=200 if body else None,
+                attempts=1,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                error_type=None if body else "empty_response",
+            )
+        except Exception as exc:
+            return FetchResult(
+                url=url,
+                body=None,
+                status_code=None,
+                attempts=1,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                error_type=type(exc).__name__.lower(),
+                error_message=str(exc),
+            )
+
+    def fetch_many(self, urls, stage: str = "detail") -> List[FetchResult]:
+        return [self.fetch(url, stage) for url in urls]
+
+
+class JavbeeScraper:
+    """JavBee 兼容入口，内部使用公共爬虫引擎。"""
+
+    def __init__(
+        self,
+        config=None,
+        http_get=None,
+        failure_store=None,
+    ):
+        self.config = dict(config or get_config("javbee", {}) or {})
+        settings_config = (
+            {"crawler": {"sources": {"javbee": self.config}}}
+            if "http" in self.config or "concurrency" in self.config
+            else {"javbee": self.config}
+        )
+        self.settings = load_source_settings(settings_config, "javbee")
+        self.base_url = str(
+            self.config.get("base_url", "https://javbee.co")
+        ).rstrip("/")
         self.start_path = str(self.config.get("start_path", "/new"))
         self.page_limit = max(1, int(self.config.get("page_limit", 30)))
-        self.workers = max(1, int(self.config.get("concurrent_workers", 6)))
-        self.timeout = max(1, int(self.config.get("request_timeout", 20)))
-        self.retry_attempts = max(1, int(self.config.get("retry_attempts", 3)))
-        self.user_agent = str(
-            self.config.get(
-                "user_agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-            )
-        )
-        proxy_url = str(self.config.get("proxy_url", "")).strip()
+        self.workers = self.settings.concurrency
+        self.timeout = self.settings.timeout
+        self.retry_attempts = self.settings.retry.attempts
+        self.user_agent = self.settings.user_agent
         self.proxies = (
-            {"http": proxy_url, "https": proxy_url}
-            if self.config.get("proxy_enable") and proxy_url
+            {
+                "http": self.settings.proxy.url,
+                "https": self.settings.proxy.url,
+            }
+            if self.settings.proxy.enabled
             else None
         )
         self.parser = JavbeeParser()
-        self._http_get = http_get or self._get_html
-
-    def crawl(self) -> Dict[str, int]:
-        start_url = urljoin(f"{self.base_url}/", self.start_path.lstrip("/"))
-        first_page = self._http_get(start_url)
-        if not first_page:
-            raise RuntimeError(f"Javbee 列表页获取失败: {start_url}")
-
-        last_page = min(self.parser.parse_last_page(first_page), self.page_limit)
-        page_urls = [start_url] + [f"{start_url}?page={page}" for page in range(2, last_page + 1)]
-        page_bodies = [first_page] + self._fetch_many(page_urls[1:])
-
-        detail_urls = []
-        for body in page_bodies:
-            if body:
-                detail_urls.extend(self.parser.parse_list(body, self.base_url))
-        detail_urls = list(dict.fromkeys(detail_urls))
-
-        existing_urls = find_existing_javbee_urls(detail_urls)
-        log.info(
-            f"Javbee 列表解析完成: pages={last_page} "
-            f"discovered={len(detail_urls)} existing={len(existing_urls)} "
-            f"new={len(detail_urls) - len(existing_urls)}"
+        self.http = (
+            _CallableHttpAdapter(http_get, self.workers)
+            if http_get is not None
+            else CrawlerHttpClient("javbee", self.settings)
         )
+        if failure_store is not None:
+            self.failure_store = failure_store
+        elif http_get is not None:
+            self.failure_store = NullFailureStore()
+        else:
+            self.failure_store = build_failure_store(
+                mongodb_enabled=bool(get_config("mongodb.enable", False))
+            )
 
-        detail_bodies = self._fetch_many(detail_urls)
-        items = []
-        failed = 0
-        for url, body in zip(detail_urls, detail_bodies):
-            item = self.parser.parse_detail(body, url) if body else None
-            if item:
-                items.append(item)
-            else:
-                failed += 1
-                log.warning(f"Javbee 详情解析失败: {url}")
-
-        save_summary = save_javbee_items(items)
-        return {
-            "pages": last_page,
-            "discovered": len(detail_urls),
-            "existing": len(existing_urls),
-            "requested": len(detail_urls),
-            "failed": failed,
-            "saved": save_summary["upserted"],
-            "updated": save_summary["modified"],
-        }
-
-    def _fetch_many(self, urls: List[str]) -> List[Optional[bytes]]:
-        if not urls:
-            return []
-        with ThreadPoolExecutor(max_workers=min(self.workers, len(urls))) as pool:
-            return list(pool.map(self._http_get, urls))
+    def crawl(
+        self,
+        *,
+        dry_run: bool = False,
+        retry_failed: bool = False,
+    ) -> Dict[str, object]:
+        source = JavbeeSource(self.config, parser=self.parser)
+        repository = JavbeeRepository(
+            self.config,
+            existing_lookup=find_existing_javbee_urls,
+            stale_lookup=find_stale_javbee_urls,
+            save_func=save_javbee_items,
+        )
+        summary = CrawlEngine(self.http, self.failure_store).run(
+            source,
+            repository,
+            dry_run=dry_run,
+            retry_failed=retry_failed,
+        )
+        summary.details["existing"] = repository.existing_count
+        result = summary.as_dict()
+        result["list_retries"] = summary.details.get("list_retries", 0)
+        log.info(
+            "Javbee 抓取汇总: "
+            f"status={result['status']} pages={result.get('pages', 0)} "
+            f"discovered={result['discovered']} existing={result['existing']} "
+            f"requested={result['requested']} failed={result['failed']} "
+            f"saved={result['saved']} updated={result['updated']}"
+        )
+        return result
 
     def _get_html(self, url: str) -> Optional[bytes]:
-        for attempt in range(1, self.retry_attempts + 1):
-            try:
-                response = requests.get(
-                    url,
-                    headers={"User-Agent": self.user_agent},
-                    proxies=self.proxies,
-                    timeout=self.timeout,
-                    allow_redirects=True,
-                    impersonate="chrome110",
-                )
-                if response.status_code == 200 and response.content:
-                    return response.content
-                log.warning(
-                    f"Javbee 请求异常: status={response.status_code} "
-                    f"attempt={attempt}/{self.retry_attempts} url={url}"
-                )
-            except Exception as exc:
-                log.warning(
-                    f"Javbee 请求失败: attempt={attempt}/{self.retry_attempts} "
-                    f"url={url} error={exc}"
-                )
-            if attempt < self.retry_attempts:
-                time.sleep(attempt)
-        return None
+        """兼容旧调用方；新代码应使用公共 HTTP 客户端。"""
+        result = self.http.fetch(url)
+        return result.body if result.ok else None
+
+    def _fetch_many(self, urls: List[str]) -> List[Optional[bytes]]:
+        return [
+            result.body if result.ok else None
+            for result in self.http.fetch_many(urls)
+        ]

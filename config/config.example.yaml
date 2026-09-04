@@ -36,62 +36,64 @@ sehuatang:
   date: null
 
 javbee:
-  # 是否在 scheduler/once 主任务中抓取 Javbee；也可用 --mode javbee 强制单独执行
-  enable: false
   base_url: "https://javbee.co"
   start_path: "/new"
   page_limit: 30
-  concurrent_workers: 6
-  request_timeout: 20
-  retry_attempts: 3
-  # Javbee 当前可直连，代理配置与 sehuatang 相互独立
-  proxy_enable: false
-  proxy_url: ""
+
+# 多来源爬虫公共配置。来源配置覆盖 defaults。
+crawler:
+  defaults:
+    concurrency: 4
+    http:
+      timeout: 30
+      impersonate: "chrome110"
+      retry:
+        attempts: 3
+        base_delay: 2
+        max_delay: 15
+        jitter: 0.3
+        statuses: [408, 425, 429, 500, 502, 503, 504]
+  sources:
+    sehuatang:
+      enabled: true
+      concurrency: 6
+      http:
+        timeout: 30
+        proxy:
+          enabled: true
+          # 生产环境建议留空，并使用 CRAWLER_SEHUATANG_PROXY_URL
+          url: "http://127.0.0.1:7890"
+      challenge:
+        flaresolverr_url: ""
+      schedule:
+        cron: "0 2 * * *"
+    javbee:
+      enabled: false
+      concurrency: 3
+      http:
+        # JavBee 偶发 20 秒以上无首字节，使用更宽松的来源级超时。
+        timeout: 60
+        proxy:
+          enabled: false
+          # 启用时同时设置 CRAWLER_JAVBEE_PROXY_ENABLED=true 和下列 URL
+          url: ""
+      refresh:
+        mode: "stale_after"  # refresh_all / new_only / stale_after
+        days: 7
+      schedule:
+        cron: "30 2 * * *"
 
 proxy:
-  # 代理服务器
+  # 旧通知模块使用的代理；爬虫请求请使用 crawler.sources.*.http.proxy
   proxy_url: "http://127.0.0.1:7890"
-  # 是否使用代理
   proxy_enable: true
 
-# HTTP 抓取配置（curl_cffi）
-http_client:
-  # 并发抓取线程数（列表/详情共用）
-  concurrent_workers: 6
-  # 单次请求超时（秒）
-  request_timeout: 15
-  # FlareSolverr 服务地址，遇到 Cloudflare 时自动过盾，留空则放弃当次抓取
-  # 例：http://localhost:8191/v1
-  flaresolverr_url: ""
-
 sendMessage:
-  # 企业微信推送
-  send_wecom_enable: false
-  corp_id: "your_corp_id"
-  corp_secret: "your_corp_secret"
-  agent_id: 1000002
-  media_id: "your_media_id"
-  to_user: "@all"
-  
-  # Telegram 推送
+  # Telegram 通知
   send_telegram_enable: true
   tg_bot_token: "your_bot_token"
   tg_chat_id: "your_chat_id"
   image_proxy_url: "https://your-image-proxy.com"
-
-# 定时任务配置
-schedule:
-  # 简单时间配置（已废弃，建议使用cron）
-  schedule_time:
-    - "01:00"
-    - "02:00"
-    - "03:00"
-    - "04:00"
-  
-  # Cron表达式配置（推荐）
-  # 格式：分 时 日 月 周
-  # 示例：每天凌晨2点执行
-  schedule_cron: "0 2 * * *"
 
 # 日志配置
 logging:
@@ -99,46 +101,3 @@ logging:
   max_file_size: 10485760  # 10MB
   backup_count: 5
   console_output: true
-
-# 性能配置
-performance:
-  max_concurrent_requests: 10
-  request_timeout: 30
-  retry_attempts: 3
-  retry_delay: 5
-
-
-# 浏览器配置
-browser:
-  # 多标签页配置
-  max_tabs: 3  # 最大标签页数量，建议2-5个，过多可能导致内存占用过高
-  tab_timeout: 30  # 获取标签页的超时时间（秒）
-  enable_multi_tab: true  # 是否启用多标签页模式，false则使用传统单页面模式
-
-  # 智能等待配置（新功能）
-  wait_strategy: "smart"  # 等待策略: "smart"(智能等待) 或 "random"(随机等待)
-  doc_load_timeout: 15    # 文档加载超时时间（秒），建议10-20秒
-  min_wait_time: 1        # 最小等待时间（秒），确保页面稳定
-  max_wait_time: 3        # 最大等待时间（秒），平衡速度和稳定性
-
-  # 传统等待配置（备用）
-  sleep_range: [3, 5]     # 随机等待时间范围（秒），仅在wait_strategy为"random"时使用
-
-  # 浏览器基础配置
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-  max_retries: 3  # 页面加载失败时的最大重试次数
-  sleep_range: [2, 4]  # 页面加载后的随机等待时间范围（秒）
-  page_load_timeout: 30  # 页面加载超时时间（秒）
-  cloudflare_timeout: 10  # Cloudflare验证超时时间（秒）
-
-  # 浏览器启动参数（高级配置）
-  arguments:
-    - "--headless=new"              # 无头浏览器模式
-    - "--no-sandbox"                # Docker环境必需
-    - "--disable-dev-shm-usage"     # 禁用/dev/shm使用
-    - "--disable-gpu"               # 禁用GPU加速
-    - "--disable-extensions"        # 禁用扩展
-    - "--disable-setuid-sandbox"    # 禁用setuid沙盒
-    - "--remote-debugging-port=9222" # 远程调试端口
-    - "--disable-web-security"      # 禁用Web安全
-    - "--ignore-certificate-errors" # 忽略证书错误

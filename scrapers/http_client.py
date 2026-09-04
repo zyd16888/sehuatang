@@ -5,12 +5,16 @@ HTTP 抓取客户端（curl_cffi + chrome110 指纹模拟）
 - 可选 CF bypass：配置 flaresolverr_url 后触发 CF 自动调用 FlareSolverr 过盾
 - Cookie 加锁，模块级单例可被 ThreadPoolExecutor 多线程共享
 """
+import os
 import re
 import threading
+from dataclasses import replace
 from typing import Optional
 
 from curl_cffi import requests
 
+from scrapers.core.config import HttpSettings, load_source_settings
+from scrapers.core.http import CrawlerHttpClient
 from util.log_util import log
 from util.read_config import get_config
 
@@ -28,20 +32,54 @@ _DEFAULT_UA = (
 class HttpClient:
     """sehuatang 专用 HTTP 客户端"""
 
-    def __init__(self):
-        ua = get_config("browser.user_agent") or _DEFAULT_UA
-        self.headers = {"User-Agent": ua}
+    def __init__(
+        self,
+        settings: Optional[HttpSettings] = None,
+        transport: Optional[CrawlerHttpClient] = None,
+    ):
+        full_config = get_config()
+        self.settings = settings or load_source_settings(full_config, "sehuatang")
+        self.headers = {"User-Agent": self.settings.user_agent or _DEFAULT_UA}
         self.cookie: dict = {"_safe": ""}
         self._cookie_lock = threading.Lock()
-        self._timeout = int(get_config("request_timeout", 15) or 15)
-        self._flaresolverr_url = (get_config("flaresolverr_url") or "").strip() or None
+        self._timeout = self.settings.timeout
+        source_config = (
+            ((full_config.get("crawler") or {}).get("sources") or {}).get(
+                "sehuatang"
+            )
+            or {}
+        )
+        challenge_config = source_config.get("challenge") or {}
+        self._flaresolverr_url = str(
+            os.getenv("CRAWLER_SEHUATANG_FLARESOLVERR_URL")
+            or challenge_config.get("flaresolverr_url")
+            or get_config("http_client.flaresolverr_url")
+            or ""
+        ).strip() or None
+        self._proxies = (
+            {
+                "http": self.settings.proxy.url,
+                "https": self.settings.proxy.url,
+            }
+            if self.settings.proxy.enabled
+            else None
+        )
 
-        proxy_cfg = get_config("proxy") or {}
-        if proxy_cfg.get("proxy_enable") and proxy_cfg.get("proxy_url"):
-            p = proxy_cfg.get("proxy_url")
-            self._proxies = {"http": p, "https": p}
-        else:
-            self._proxies = None
+        # 站点挑战状态由本类处理，不能先在通用层按普通 429/503 重试。
+        retry = replace(
+            self.settings.retry,
+            statuses=tuple(
+                status
+                for status in self.settings.retry.statuses
+                if status not in _CF_STATUS
+            ),
+        )
+        transport_settings = replace(self.settings, retry=retry)
+        self._transport = transport or CrawlerHttpClient(
+            "sehuatang",
+            transport_settings,
+            request_func=self._request_with_cookies,
+        )
 
     # ---------- 公共 API ----------
 
@@ -79,16 +117,18 @@ class HttpClient:
     # ---------- 内部 ----------
 
     def _request(self, url: str) -> tuple[int, bytes]:
-        r = requests.get(
+        result = self._transport.fetch(url)
+        return result.status_code or 0, (result.body or b"")
+
+    def _request_with_cookies(self, url: str, **kwargs):
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers.update(self.headers)
+        return requests.get(
             url,
-            proxies=self._proxies,
             cookies=self._cookie_copy(),
-            headers=self.headers,
-            allow_redirects=True,
-            timeout=self._timeout,
-            impersonate="chrome110",
+            headers=headers,
+            **kwargs,
         )
-        return r.status_code, (r.content or b"")
 
     def _cookie_copy(self) -> dict:
         with self._cookie_lock:

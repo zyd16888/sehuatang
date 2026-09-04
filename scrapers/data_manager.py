@@ -49,6 +49,7 @@ class DataManager:
         data_list: List[Dict[str, Any]],
         fid: int,
         strict: bool = False,
+        dry_run: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         过滤并保存数据
@@ -66,8 +67,9 @@ class DataManager:
             mysql = self._get_mysql_instance()
             try:
                 filtered_data = mysql.filter_data(data_list, fid)
-                mysql.save_data(filtered_data, fid)
-                self.log.info(f"MySQL保存数据成功，共{len(filtered_data)}条")
+                if not dry_run:
+                    mysql.save_data(filtered_data, fid)
+                    self.log.info(f"MySQL保存数据成功，共{len(filtered_data)}条")
             except Exception as e:
                 self.log.error(f"MySQL操作失败: {e}")
                 if strict:
@@ -78,8 +80,9 @@ class DataManager:
         if self.mongodb_enable:
             try:
                 filtered_data = filter_data(data_list, fid)
-                save_data(filtered_data, fid)
-                self.log.info(f"MongoDB保存数据成功，共{len(filtered_data)}条")
+                if not dry_run:
+                    save_data(filtered_data, fid)
+                    self.log.info(f"MongoDB保存数据成功，共{len(filtered_data)}条")
             except Exception as e:
                 self.log.error(f"MongoDB操作失败: {e}")
                 if strict:
@@ -88,6 +91,9 @@ class DataManager:
         if not self.mysql_enable and not self.mongodb_enable:
             self.log.info("未启用数据库，跳过数据保存")
             filtered_data = data_list
+
+        if dry_run:
+            self.log.info(f"dry-run：跳过数据写入，共{len(filtered_data)}条")
             
         return filtered_data
     

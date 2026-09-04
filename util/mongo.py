@@ -1,7 +1,7 @@
 # 连接mongodb
 
 import pymongo
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from util.log_util import log
 from util.config import date, mongodb_host, mongodb_port, mongodb_conn_str, mongodb_use_conn_str
 
@@ -15,6 +15,7 @@ send_context_str = "本次抓取的结果如下：\n"
 db = client.sehuatang
 
 JAVBEE_COLLECTION_NAME = "javbee_items"
+CRAWL_FAILURE_COLLECTION_NAME = "crawl_failures"
 
 
 # 枚举，通过fid获取板块名称
@@ -206,6 +207,122 @@ def find_existing_javbee_urls(urls, collection=None):
         {"_id": 0, "url": 1},
     )
     return {row["url"] for row in rows if row.get("url")}
+
+
+def find_stale_javbee_urls(urls, cutoff, collection=None):
+    """返回需要按时间刷新、或尚无刷新时间的 Javbee URL。"""
+    if not urls:
+        return set()
+    if collection is None:
+        collection = get_javbee_collection()
+
+    rows = collection.find(
+        {
+            "url": {"$in": list(dict.fromkeys(urls))},
+            "$or": [
+                {"updated_at": {"$lte": cutoff}},
+                {"updated_at": {"$exists": False}},
+            ],
+        },
+        {"_id": 0, "url": 1},
+    )
+    return {row["url"] for row in rows if row.get("url")}
+
+
+def get_crawl_failure_collection():
+    return db[CRAWL_FAILURE_COLLECTION_NAME]
+
+
+def ensure_crawl_failure_indexes(collection=None):
+    if collection is None:
+        collection = get_crawl_failure_collection()
+    collection.create_index(
+        [
+            ("source", pymongo.ASCENDING),
+            ("source_key", pymongo.ASCENDING),
+            ("stage", pymongo.ASCENDING),
+        ],
+        unique=True,
+        name="uniq_source_key_stage",
+    )
+    collection.create_index(
+        [("next_retry_at", pymongo.ASCENDING)],
+        name="idx_next_retry_at",
+    )
+
+
+def record_crawl_failures(failures, collection=None):
+    if not failures:
+        return
+    if collection is None:
+        collection = get_crawl_failure_collection()
+    ensure_crawl_failure_indexes(collection)
+
+    now = datetime.now(timezone.utc)
+    operations = []
+    for failure in failures:
+        attempts = max(1, int(failure.get("attempts", 1)))
+        retry_delay_minutes = min(24 * 60, 5 * (2 ** (attempts - 1)))
+        operations.append(
+            pymongo.UpdateOne(
+                {
+                    "source": failure["source"],
+                    "source_key": failure["source_key"],
+                    "stage": failure["stage"],
+                },
+                {
+                    "$set": {
+                        "url": failure["url"],
+                        "attempts": attempts,
+                        "error_type": failure.get("error_type") or "unknown",
+                        "error_message": str(failure.get("error_message") or "")[:1000],
+                        "metadata": dict(failure.get("metadata") or {}),
+                        "last_failed_at": now,
+                        "next_retry_at": now + timedelta(minutes=retry_delay_minutes),
+                        "resolved_at": None,
+                    },
+                    "$inc": {"failure_count": 1},
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+        )
+    collection.bulk_write(operations, ordered=False)
+
+
+def clear_crawl_failures(source, source_keys, collection=None):
+    if not source_keys:
+        return
+    if collection is None:
+        collection = get_crawl_failure_collection()
+    collection.delete_many(
+        {
+            "source": source,
+            "source_key": {"$in": list(dict.fromkeys(source_keys))},
+        }
+    )
+
+
+def find_due_crawl_failures(source, now=None, collection=None, limit=500):
+    if collection is None:
+        collection = get_crawl_failure_collection()
+    now = now or datetime.now(timezone.utc)
+    rows = collection.find(
+        {
+            "source": source,
+            "resolved_at": None,
+            "next_retry_at": {"$lte": now},
+        },
+        {
+            "_id": 0,
+            "source_key": 1,
+            "url": 1,
+            "stage": 1,
+            "metadata": 1,
+            "next_retry_at": 1,
+        },
+    ).sort("next_retry_at", pymongo.ASCENDING).limit(max(1, int(limit)))
+    return list(rows)
 
 
 def save_javbee_items(data_list, collection=None, preserve_existing=False):

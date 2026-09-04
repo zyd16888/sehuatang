@@ -232,7 +232,44 @@ def setup_default_scheduler() -> SchedulerManager:
     if not manager.initialize():
         raise RuntimeError("调度器初始化失败")
     
-    # 从配置文件读取调度配置
+    # 优先使用每来源独立调度；未配置时兼容旧的全量 cron。
+    full_config = get_config() or {}
+    crawler_sources = ((full_config.get("crawler") or {}).get("sources") or {})
+    source_jobs = 0
+    if crawler_sources:
+        from main import crawl_sources
+        from scrapers.registry import source_registry
+
+        for source_name in source_registry.names():
+            source_config = crawler_sources.get(source_name) or {}
+            cron_expression = (source_config.get("schedule") or {}).get("cron")
+            enabled = source_config.get(
+                "enabled",
+                source_registry.is_enabled(full_config, source_name),
+            )
+            if not enabled or not cron_expression:
+                continue
+
+            async def source_task(name=source_name):
+                return await crawl_sources([name])
+
+            wrapped_task = create_async_job_wrapper(
+                source_task,
+                f"{source_name} 抓取任务",
+            )
+            if manager.add_cron_job(
+                wrapped_task,
+                cron_expression,
+                f"crawl_{source_name}",
+                f"{source_name} 抓取任务",
+                max_instances=1,
+            ):
+                source_jobs += 1
+
+    if source_jobs:
+        return manager
+
+    # 旧配置兼容：所有已启用来源仍由一个任务顺序执行。
     schedule_config = get_config("schedule", {})
     cron_expression = schedule_config.get("schedule_cron")
     

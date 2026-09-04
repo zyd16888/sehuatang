@@ -1,5 +1,6 @@
 .idea
 .vscode
+.claude/
 __pycache__/
 logs/
 dist/
@@ -13,3 +14,7 @@ cfproxy.py
 test/
 test_*.py
 test.py
+data/backfill_progress.json
+data/crawl_failures.json
+scripts/list.txt
+scripts/generated/

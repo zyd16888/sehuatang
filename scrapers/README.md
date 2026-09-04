@@ -1,48 +1,99 @@
-# 数据抓取模块
+# 多来源爬虫架构
 
-## 架构
+## 模块边界
 
-```
-scrapers/
-├── http_client.py          # HTTP 抓取客户端（curl_cffi + chrome110 指纹）
-├── web_scraper.py          # 主协调器，并发抓取列表 / 详情
-├── page_parser.py          # HTML 解析（BeautifulSoup）
-├── data_processor.py       # 数据合并 / 验证 / 清理
-├── data_manager.py         # MongoDB / MySQL 写入与去重
-└── notification_manager.py # 推送（Telegram / 企业微信）
-```
-
-抓取层走 `curl_cffi.requests`，伪装 Chrome 110 的 TLS / JA3 指纹直接拿 HTML，
-无需真实浏览器。自动处理两种拦截：
-
-- **R18 拦截页**（小体积 + 含 `var safeid='xxx'` 内嵌脚本）：自动提取 `safeid`
-  写入 `_safe` cookie 并重试一次。
-- **Cloudflare 挑战**（403/429/503 或挑战标题）：可选调用 FlareSolverr 服务
-  自动过盾，未配置 `flaresolverr_url` 时放弃本次抓取并告警。
-
-## 使用
-
-```python
-from scrapers.web_scraper import WebScraper
-
-with WebScraper() as scraper:
-    result = await scraper.crawl_forum_section(fid)
+```text
+run.py / scheduler
+        |
+scrapers.registry
+        |
+  +-----+------------------+
+  |                        |
+sources/sehuatang      sources/javbee
+  |                        |
+  +----- core + infrastructure -----+
 ```
 
-## 关键配置（config.yaml）
+`scrapers/core` 负责来源无关能力：
 
-```yaml
-http_client:
-  concurrent_workers: 6       # 并发线程数
-  request_timeout: 15
-  flaresolverr_url: ""        # 留空则禁用 CF 自动过盾
+- `config.py`：默认值、来源覆盖、环境变量覆盖和配置校验
+- `http.py`：代理、超时、可重试状态分类、指数退避、抖动和批量请求
+- `contracts.py`：source、repository、failure store 的数据合同
+- `engine.py`：发现、筛选、详情抓取、解析、保存和运行汇总
+- `models.py`：请求结果及 `success/partial_success/failed` 状态
 
-browser:
-  user_agent: "Mozilla/5.0 ..."  # 仅 user_agent 字段被 http_client 复用，其他字段保留兼容
+`scrapers/sources/<name>` 负责站点差异：
+
+- 列表入口和分页发现
+- HTML 解析及数据校验
+- 唯一键、刷新策略和 collection 映射
+- 站点专属挑战及特殊任务
+
+`scrapers/infrastructure` 负责 MongoDB/JSON 失败台账等外部适配。
+
+## HTTP 与重试
+
+每个来源独立解析 `concurrency`、`http.timeout`、`http.proxy` 和
+`http.retry`。默认只重试连接类异常、空响应以及
+`408/425/429/500/502/503/504`，普通 `4xx` 不重试。退避时间使用指数增长和
+随机抖动，并尊重数字形式的 `Retry-After`。
+
+Sehuatang 的 R18 safeid 和 FlareSolverr 留在来源专属 `HttpClient` 中；普通
+网络重试委托给公共 transport。JavBee 直接使用公共 transport。
+
+环境变量使用明确的来源前缀：
+
+```text
+CRAWLER_JAVBEE_CONCURRENCY
+CRAWLER_JAVBEE_TIMEOUT
+CRAWLER_JAVBEE_PROXY_ENABLED
+CRAWLER_JAVBEE_PROXY_URL
+CRAWLER_JAVBEE_RETRY_ATTEMPTS
+CRAWLER_SEHUATANG_FLARESOLVERR_URL
 ```
 
-## 扩展
+代理 URL 与 `PROXY_ENABLED=true` 应同时设置；把 `JAVBEE` 替换为
+`SEHUATANG` 即可覆盖另一个来源。代理凭据不要写入仓库，
+公共日志会隐藏 URL 用户信息和常见敏感查询参数。
 
-- 新增解析器：继承 `PageParser`
-- 新增数据库：扩展 `DataManager`
-- 新增通知方式：扩展 `NotificationManager`
+## 运行入口
+
+```powershell
+# 运行一个或全部来源
+python run.py crawl --source javbee
+python run.py crawl --source sehuatang
+python run.py crawl --source all
+
+# 只抓取和解析，不写库、不通知、不推进 checkpoint
+python run.py crawl --source javbee --dry-run
+
+# 重试失败台账中已到期的目标，不重新扫描列表页
+python run.py retry-failed --source javbee
+python run.py retry-failed --source sehuatang
+```
+
+`--mode once|javbee|backfill|bot|health` 继续兼容。新配置使用
+`crawler.sources.<source>.schedule.cron` 为每个来源创建独立任务；未配置来源级
+cron 时，调度器回退到旧的统一 `schedule.schedule_cron`。
+
+## 失败台账
+
+终态详情失败保存以下信息：
+
+```text
+source / source_key / url / stage / attempts / error_type
+error_message / metadata / failure_count / next_retry_at
+```
+
+MongoDB 启用时写入 `crawl_failures` collection，否则写入
+`data/crawl_failures.json`。成功保存后会清除同来源、同 key 的失败记录。
+
+## 新增来源
+
+1. 在 `scrapers/sources/<name>` 实现来源发现和解析逻辑。
+2. 使用 `CrawlerHttpClient`，不要在来源内复制代理和重试循环。
+3. 实现 `RecordRepository`，保留该来源自己的 schema 和唯一键。
+4. 在 `scrapers/registry.py` 显式注册来源及 runner。
+5. 为解析 fixture、刷新策略、部分成功和失败恢复补充测试。
+
+不使用目录扫描或动态插件加载；显式 registry 更容易审查，也足以支持当前规模。

@@ -1,5 +1,5 @@
 import asyncio
-from scrapers.javbee_scraper import JavbeeScraper
+from scrapers.registry import source_registry
 from scrapers.web_scraper import WebScraper
 from util.log_util import log
 from util.config import fid_list
@@ -20,62 +20,79 @@ async def crawl_forum_section(fid: int) -> str:
         return await scraper.crawl_forum_section(fid)
 
 
-async def crawl_sehuatang():
+async def crawl_sehuatang(dry_run: bool = False):
     """执行现有 Discuz 数据源抓取。"""
     from util.config import date
 
     log.info(f"开始执行 sehuatang 数据抓取，日期: {date()}")
 
-    # 使用上下文管理器确保资源正确释放
-    with WebScraper() as scraper:
-        # 初始化主页
-        if not scraper.initialize_homepage():
-            log.error("sehuatang 主页初始化失败")
-            return
-
-        # 遍历所有板块进行爬取
-        for fid in fid_list:
-            try:
-                log.info(f"开始处理板块 {fid}")
-                result = await scraper.crawl_forum_section(fid)
-                log.info(f"板块 {fid} 处理完成: {result}")
-            except Exception as e:
-                log.error(f"处理板块 {fid} 时出错: {e}")
-                continue
-
-    log.info("sehuatang 所有板块处理完成")
+    result = await source_registry.run(
+        "sehuatang",
+        get_config(),
+        force=True,
+        dry_run=dry_run,
+    )
+    log.info(f"sehuatang 数据抓取完成: {result}")
+    return result
 
 
-async def crawl_javbee(force: bool = False):
+async def crawl_javbee(
+    force: bool = False,
+    dry_run: bool = False,
+    retry_failed: bool = False,
+):
     """执行独立 Javbee 数据源抓取。"""
-    config = get_config("javbee", {}) or {}
-    if not force and not config.get("enable", False):
-        log.info("Javbee 数据源未启用，跳过")
-        return None
-
-    if not get_config("mongodb.enable", False):
-        raise RuntimeError("Javbee 数据源要求启用 MongoDB")
-
     log.info("开始执行 Javbee 数据抓取")
-    summary = await asyncio.to_thread(JavbeeScraper(config=config).crawl)
+    summary = await source_registry.run(
+        "javbee",
+        get_config(),
+        force=force,
+        dry_run=dry_run,
+        retry_failed=retry_failed,
+    )
     log.info(f"Javbee 数据抓取完成: {summary}")
     return summary
 
 
-async def main():
-    """主函数，顺序执行已配置的数据源。"""
-    await crawl_sehuatang()
-    await crawl_javbee()
+async def crawl_sources(
+    sources=None,
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    retry_failed: bool = False,
+):
+    selected = list(sources or source_registry.names())
+    return await source_registry.run_many(
+        selected,
+        get_config(),
+        force=force,
+        dry_run=dry_run,
+        retry_failed=retry_failed,
+    )
+
+
+async def main(sources=None, dry_run: bool = False):
+    """主函数，通过来源注册表执行已配置的数据源。"""
+    results = await crawl_sources(sources, dry_run=dry_run)
     log.info("所有数据源处理完成，程序结束")
+    return results
 
 
-async def backfill(year: int, fids=None, resume: bool = False) -> bool:
+async def backfill(
+    year: int,
+    fids=None,
+    resume: bool = False,
+    dry_run: bool = False,
+) -> bool:
     """按年份补抓历史数据；未指定板块时使用配置中的全部板块。"""
     selected_fids = list(fids) if fids else list(fid_list)
     success = True
     log.info(f"开始执行 {year} 年历史补抓，板块: {selected_fids}")
 
-    with WebScraper(target_date=str(year)) as scraper:
+    scraper_options = {"target_date": str(year)}
+    if dry_run:
+        scraper_options["dry_run"] = True
+    with WebScraper(**scraper_options) as scraper:
         for fid in selected_fids:
             try:
                 summary = await scraper.backfill_forum_section(

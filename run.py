@@ -35,7 +35,7 @@ class ApplicationRunner:
         log.info(f"接收到信号 {signum}，正在优雅关闭...")
         self.stop()
 
-    def run_once(self):
+    def run_once(self, dry_run=False):
         """运行一次主任务"""
         try:
             log.info("开始执行单次任务")
@@ -44,15 +44,17 @@ class ApplicationRunner:
             from main import main as main_task
 
             # 运行主任务
-            asyncio.run(main_task())
+            results = asyncio.run(main_task(dry_run=dry_run))
 
             log.info("单次任务执行完成")
+            return all(
+                result.get("status") != "failed"
+                for result in results.values()
+            )
 
         except Exception as e:
             ExceptionHandler.handle_and_log(e, "执行单次任务时出错")
             return False
-
-        return True
 
     def run_scheduler(self):
         """运行调度器模式"""
@@ -87,28 +89,73 @@ class ApplicationRunner:
             ExceptionHandler.handle_and_log(e, "运行调度器时出错")
             return False
 
-    def run_backfill(self, year, fids, resume=False):
+    def run_backfill(self, year, fids, resume=False, dry_run=False):
         """按年份运行一次历史补抓任务。"""
         try:
             import asyncio
             from main import backfill as backfill_task
 
             log.info(f"开始执行 {year} 年历史补抓任务")
-            return asyncio.run(backfill_task(year, fids, resume=resume))
+            return asyncio.run(
+                backfill_task(
+                    year,
+                    fids,
+                    resume=resume,
+                    dry_run=dry_run,
+                )
+            )
         except Exception as e:
             ExceptionHandler.handle_and_log(e, "执行历史补抓任务时出错")
             return False
 
-    def run_javbee(self):
+    def run_javbee(self, dry_run=False, retry_failed=False):
         """单独运行 Javbee 数据源。"""
         try:
             import asyncio
             from main import crawl_javbee
 
-            asyncio.run(crawl_javbee(force=True))
-            return True
+            summary = asyncio.run(
+                crawl_javbee(
+                    force=True,
+                    dry_run=dry_run,
+                    retry_failed=retry_failed,
+                )
+            )
+            return summary.get("status") != "failed"
         except Exception as e:
             ExceptionHandler.handle_and_log(e, "执行 Javbee 抓取任务时出错")
+            return False
+
+    def run_crawl(
+        self,
+        source="all",
+        dry_run=False,
+        retry_failed=False,
+    ):
+        try:
+            import asyncio
+            from main import crawl_sources
+            from scrapers.registry import source_registry
+
+            sources = (
+                source_registry.names()
+                if source == "all"
+                else [source]
+            )
+            results = asyncio.run(
+                crawl_sources(
+                    sources,
+                    force=True,
+                    dry_run=dry_run,
+                    retry_failed=retry_failed,
+                )
+            )
+            return all(
+                result.get("status") not in {"failed"}
+                for result in results.values()
+            )
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "执行来源抓取任务时出错")
             return False
 
     def run_bot(self):
@@ -140,9 +187,14 @@ class ApplicationRunner:
         try:
             # 检查配置文件
             from util.read_config import get_config
+            from scrapers.core.config import load_source_settings
+            from scrapers.registry import source_registry
             config = get_config()
             if not config:
                 return False
+
+            for source_name in source_registry.names():
+                load_source_settings(config, source_name)
 
             # 检查日志系统
             log.info("健康检查通过")
@@ -176,7 +228,16 @@ def create_argument_parser():
   python run.py --mode backfill --year 2025
   python run.py --mode backfill --year 2025 --fid 103 --fid 104
   python run.py --mode backfill --year 2025 --resume
+  python run.py crawl --source javbee --dry-run
+  python run.py retry-failed --source javbee
         """
+    )
+
+    parser.add_argument(
+        "action",
+        nargs="?",
+        choices=["crawl", "retry-failed"],
+        help="新式命令入口；未指定时继续使用 --mode",
     )
 
     parser.add_argument(
@@ -190,6 +251,18 @@ def create_argument_parser():
         "--verbose",
         action="store_true",
         help="详细输出模式"
+    )
+
+    parser.add_argument(
+        "--source",
+        choices=["all", "sehuatang", "javbee"],
+        help="crawl/retry-failed 的数据来源",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="执行抓取和解析，但不写数据库、不通知、不推进检查点",
     )
 
     parser.add_argument(
@@ -239,6 +312,7 @@ def main():
 
     # 设置日志级别
     if args.verbose:
+        log.set_level("DEBUG")
         log.info("启用详细输出模式")
 
     # 创建应用程序运行器
@@ -246,16 +320,32 @@ def main():
 
     try:
         # 根据模式运行
-        if args.mode == "once":
-            success = runner.run_once()
+        if args.action == "crawl":
+            success = runner.run_crawl(
+                source=args.source or "all",
+                dry_run=args.dry_run,
+            )
+        elif args.action == "retry-failed":
+            success = runner.run_crawl(
+                source=args.source or "javbee",
+                dry_run=args.dry_run,
+                retry_failed=True,
+            )
+        elif args.mode == "once":
+            success = runner.run_once(dry_run=args.dry_run)
         elif args.mode == "bot":
             success = runner.run_bot()
         elif args.mode == "health":
             success = runner.health_check()
         elif args.mode == "backfill":
-            success = runner.run_backfill(args.year, args.fid, args.resume)
+            success = runner.run_backfill(
+                args.year,
+                args.fid,
+                args.resume,
+                args.dry_run,
+            )
         elif args.mode == "javbee":
-            success = runner.run_javbee()
+            success = runner.run_javbee(dry_run=args.dry_run)
         else:  # scheduler
             success = runner.run_scheduler()
 

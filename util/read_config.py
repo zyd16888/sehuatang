@@ -8,6 +8,23 @@ from typing import Any, Optional, Dict
 from pathlib import Path
 
 
+LEGACY_KEY_PATHS = {
+    "cookie": "sehuatang.cookie",
+    "date": "sehuatang.date",
+    "domain_name": "sehuatang.domain_name",
+    "fid": "sehuatang.fid",
+    "image_proxy_url": "sendMessage.image_proxy_url",
+    "page_num": "sehuatang.page_num",
+    "proxy_enable": "proxy.proxy_enable",
+    "proxy_host": "proxy.proxy_host",
+    "proxy_url": "proxy.proxy_url",
+    "schedule_cron": "schedule.schedule_cron",
+    "schedule_time": "schedule.schedule_time",
+    "tg_bot_token": "sendMessage.tg_bot_token",
+    "tg_chat_id": "sendMessage.tg_chat_id",
+}
+
+
 class ConfigManager:
     """配置管理器"""
 
@@ -81,10 +98,10 @@ class ConfigManager:
         if key in config:
             return config[key]
 
-        # 二级键查找（兼容旧版本）
-        for section_key, section_value in config.items():
-            if isinstance(section_value, dict) and key in section_value:
-                return section_value[key]
+        # 兼容旧调用，但只允许显式别名，禁止跨来源模糊命中同名键。
+        legacy_path = LEGACY_KEY_PATHS.get(key)
+        if legacy_path:
+            return self.get_config(legacy_path, default)
 
         return default
 
