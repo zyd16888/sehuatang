@@ -1,7 +1,6 @@
 # 核心依赖
 beautifulsoup4>=4.12.0
 PyYAML>=6.0
-requests>=2.31.0
 pymongo[srv]>=4.6.0
 pymysql>=1.1.0
 
