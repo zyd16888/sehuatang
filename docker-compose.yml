@@ -11,10 +11,9 @@ services:
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai
       - DOCKER_CONTAINER=true
-      - RUN_MODE=scheduler
       - PYTHONPATH=/app
       # 启用 CF 过盾时取消下行注释（同时配置 flaresolverr profile）
-      # - SHT_HTTP_CLIENT_FLARESOLVERR_URL=http://flaresolverr:8191/v1
+      # - CRAWLER_SEHUATANG_FLARESOLVERR_URL=http://flaresolverr:8191/v1
 
     # 挂载卷
     volumes:
@@ -44,7 +43,7 @@ services:
         max-file: "3"
 
     # 默认命令
-    command: ["python", "docker_run.py"]
+    command: ["python", "run.py"]
 
   # CF 过盾服务（仅在遇到 Cloudflare 挑战时需要，用 --profile flaresolverr 启动）
   flaresolverr:

@@ -69,9 +69,6 @@ docker-compose*.yml
 *_backup.*
 config_bak.yaml
 
-# Effect pictures (demo images)
-effect picture/
-
 # Development tools
 .pre-commit-config.yaml
 .flake8
@@ -89,6 +86,3 @@ tox.ini
 config/config.yaml
 .env
 .env.local
-
-# Scripts (keep only essential ones)
-scripts/cleanup.py

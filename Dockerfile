@@ -51,6 +51,4 @@ LABEL org.opencontainers.image.licenses="MIT"
 EXPOSE 8080
 
 ENV DOCKER_CONTAINER=true
-ENV RUN_MODE=scheduler
-
-CMD ["python", "docker_run.py"]
+CMD ["python", "run.py"]
