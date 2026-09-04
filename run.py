@@ -99,6 +99,18 @@ class ApplicationRunner:
             ExceptionHandler.handle_and_log(e, "执行历史补抓任务时出错")
             return False
 
+    def run_javbee(self):
+        """单独运行 Javbee 数据源。"""
+        try:
+            import asyncio
+            from main import crawl_javbee
+
+            asyncio.run(crawl_javbee(force=True))
+            return True
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "执行 Javbee 抓取任务时出错")
+            return False
+
     def run_bot(self):
         """运行Telegram Bot"""
         try:
@@ -153,12 +165,14 @@ def create_argument_parser():
   bot       - Telegram Bot模式
   health    - 健康检查模式
   backfill  - 按年份补抓历史数据
+  javbee    - 单独抓取 Javbee 数据源
 
 示例:
   python run.py                    # 运行调度器
   python run.py --mode once        # 执行一次任务
   python run.py --mode bot         # 运行Telegram Bot
   python run.py --mode health      # 健康检查
+  python run.py --mode javbee      # 单独抓取 Javbee
   python run.py --mode backfill --year 2025
   python run.py --mode backfill --year 2025 --fid 103 --fid 104
   python run.py --mode backfill --year 2025 --resume
@@ -167,7 +181,7 @@ def create_argument_parser():
 
     parser.add_argument(
         "--mode",
-        choices=["scheduler", "once", "bot", "health", "backfill"],
+        choices=["scheduler", "once", "bot", "health", "backfill", "javbee"],
         default="scheduler",
         help="运行模式 (默认: scheduler)"
     )
@@ -240,6 +254,8 @@ def main():
             success = runner.health_check()
         elif args.mode == "backfill":
             success = runner.run_backfill(args.year, args.fid, args.resume)
+        elif args.mode == "javbee":
+            success = runner.run_javbee()
         else:  # scheduler
             success = runner.run_scheduler()
 

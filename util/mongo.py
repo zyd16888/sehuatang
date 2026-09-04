@@ -1,6 +1,7 @@
 # 连接mongodb
 
 import pymongo
+from datetime import datetime, timezone
 from util.log_util import log
 from util.config import date, mongodb_host, mongodb_port, mongodb_conn_str, mongodb_use_conn_str
 
@@ -12,6 +13,8 @@ else:
 send_context_str = "本次抓取的结果如下：\n"
 
 db = client.sehuatang
+
+JAVBEE_COLLECTION_NAME = "javbee_items"
 
 
 # 枚举，通过fid获取板块名称
@@ -161,3 +164,117 @@ def send_context(data_list, collection_name):
 def get_send_context():
     global send_context_str
     return send_context_str
+
+
+def get_javbee_collection():
+    return db[JAVBEE_COLLECTION_NAME]
+
+
+def ensure_javbee_indexes(collection=None):
+    """创建 javbee_items 所需索引；重复调用是安全的。"""
+    if collection is None:
+        collection = get_javbee_collection()
+
+    collection.create_index(
+        [("source_key", pymongo.ASCENDING)],
+        unique=True,
+        name="uniq_source_key",
+    )
+    collection.create_index([("url", pymongo.ASCENDING)], name="idx_url")
+    collection.create_index(
+        [("code", pymongo.ASCENDING), ("date", pymongo.DESCENDING)],
+        name="idx_code_date",
+    )
+    collection.create_index(
+        [("code_normalized", pymongo.ASCENDING), ("date", pymongo.DESCENDING)],
+        name="idx_code_normalized_date",
+    )
+    collection.create_index(
+        [("date", pymongo.DESCENDING)],
+        name="idx_date",
+    )
+
+
+def find_existing_javbee_urls(urls, collection=None):
+    if not urls:
+        return set()
+    if collection is None:
+        collection = get_javbee_collection()
+
+    rows = collection.find(
+        {"url": {"$in": list(dict.fromkeys(urls))}},
+        {"_id": 0, "url": 1},
+    )
+    return {row["url"] for row in rows if row.get("url")}
+
+
+def save_javbee_items(data_list, collection=None, preserve_existing=False):
+    """按 Javbee 详情页标识幂等写入 javbee_items。"""
+    if not data_list:
+        return {"processed": 0, "matched": 0, "modified": 0, "upserted": 0}
+    if collection is None:
+        collection = get_javbee_collection()
+
+    ensure_javbee_indexes(collection)
+    now = datetime.now(timezone.utc)
+    operations = []
+    for item in data_list:
+        if not item.get("url"):
+            raise ValueError("javbee 数据缺少 url")
+        if not item.get("source_key"):
+            raise ValueError(f"javbee 数据缺少 source_key: {item['url']}")
+        if not item.get("date"):
+            raise ValueError(f"javbee 数据缺少 date: {item['url']}")
+
+        document = dict(item)
+        if preserve_existing:
+            metadata_fields = {
+                "legacy_mysql_id",
+                "complete",
+                "ised2k",
+                "publish",
+                "migrated_at",
+            }
+            set_fields = {
+                key: value
+                for key, value in document.items()
+                if key in metadata_fields
+            }
+            set_fields["updated_at"] = now
+            insert_fields = {
+                key: value
+                for key, value in document.items()
+                if key not in metadata_fields
+            }
+            insert_fields["created_at"] = now
+        else:
+            set_fields = document
+            set_fields["updated_at"] = now
+            insert_fields = {"created_at": now}
+            for field in ("complete", "ised2k", "publish"):
+                if field not in document:
+                    insert_fields[field] = 0
+        operations.append(
+            pymongo.UpdateOne(
+                {"source_key": document["source_key"]},
+                {
+                    "$set": set_fields,
+                    "$setOnInsert": insert_fields,
+                },
+                upsert=True,
+            )
+        )
+
+    result = collection.bulk_write(operations, ordered=True)
+    summary = {
+        "processed": len(operations),
+        "matched": result.matched_count,
+        "modified": result.modified_count,
+        "upserted": result.upserted_count,
+    }
+    log.info(
+        "MongoDB 保存 javbee_items 完成: "
+        f"processed={summary['processed']} matched={summary['matched']} "
+        f"modified={summary['modified']} upserted={summary['upserted']}"
+    )
+    return summary

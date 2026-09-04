@@ -35,6 +35,19 @@ sehuatang:
   # 支持正则匹配，可输入 yyyy-mm 抓取指定月份的所有日期
   date: null
 
+javbee:
+  # 是否在 scheduler/once 主任务中抓取 Javbee；也可用 --mode javbee 强制单独执行
+  enable: false
+  base_url: "https://javbee.co"
+  start_path: "/new"
+  page_limit: 30
+  concurrent_workers: 6
+  request_timeout: 20
+  retry_attempts: 3
+  # Javbee 当前可直连，代理配置与 sehuatang 相互独立
+  proxy_enable: false
+  proxy_url: ""
+
 proxy:
   # 代理服务器
   proxy_url: "http://127.0.0.1:7890"
