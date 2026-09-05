@@ -4,6 +4,7 @@ import pymongo
 from datetime import datetime, timedelta, timezone
 from util.log_util import log
 from util.config import date, mongodb_host, mongodb_port, mongodb_conn_str, mongodb_use_conn_str
+from util.resource_clock import collected_document, resource_update_pipeline
 
 if mongodb_use_conn_str:
     client = pymongo.MongoClient(mongodb_conn_str)
@@ -51,7 +52,9 @@ def save_data(data_list, fid):
     collection_name = get_plate_name(fid)
     collection = db[collection_name]
     if len(data_list) > 0:
-        collection.insert_many(data_list)
+        ensure_resource_clock_indexes(collection)
+        now = datetime.now(timezone.utc)
+        collection.insert_many([collected_document(item, now) for item in data_list])
         send_context(data_list, collection_name)
         log.info("mongo 保存数据成功, 共存入数据库{}条".format(len(data_list)))
     else:
@@ -171,10 +174,19 @@ def get_javbee_collection():
     return db[JAVBEE_COLLECTION_NAME]
 
 
+def ensure_resource_clock_indexes(collection):
+    collection.create_index([("collected_at", pymongo.ASCENDING), ("_id", pymongo.ASCENDING)],
+                            name="idx_resource_collected")
+    collection.create_index([("resource_updated_at", pymongo.ASCENDING), ("_id", pymongo.ASCENDING)],
+                            name="idx_resource_updated")
+
+
 def ensure_javbee_indexes(collection=None):
     """创建 javbee_items 所需索引；重复调用是安全的。"""
     if collection is None:
         collection = get_javbee_collection()
+
+    ensure_resource_clock_indexes(collection)
 
     collection.create_index(
         [("source_key", pymongo.ASCENDING)],
@@ -365,12 +377,18 @@ def save_javbee_items(data_list, collection=None, preserve_existing=False):
             }
             insert_fields["created_at"] = now
         else:
-            set_fields = document
-            set_fields["updated_at"] = now
-            insert_fields = {"created_at": now}
+            # Insert provenance first. Until the following atomic payload update
+            # succeeds, the row has no resource_updated_at and is not incremental.
+            insert_fields = {"created_at": now, "resource_collection_pending": True}
             for field in ("complete", "ised2k", "publish"):
                 if field not in document:
                     insert_fields[field] = 0
+            operations.append(pymongo.UpdateOne(
+                {"source_key": document["source_key"]},
+                {"$setOnInsert": insert_fields}, upsert=True))
+            operations.append(pymongo.UpdateOne(
+                {"source_key": document["source_key"]}, resource_update_pipeline(document)))
+            continue
         operations.append(
             pymongo.UpdateOne(
                 {"source_key": document["source_key"]},
@@ -384,9 +402,9 @@ def save_javbee_items(data_list, collection=None, preserve_existing=False):
 
     result = collection.bulk_write(operations, ordered=True)
     summary = {
-        "processed": len(operations),
-        "matched": result.matched_count,
-        "modified": result.modified_count,
+        "processed": len(data_list),
+        "matched": result.matched_count if preserve_existing else max(0, result.matched_count - len(data_list)),
+        "modified": result.modified_count if preserve_existing else max(0, result.modified_count - result.upserted_count),
         "upserted": result.upserted_count,
     }
     log.info(

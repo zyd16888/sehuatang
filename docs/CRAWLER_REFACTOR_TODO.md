@@ -44,6 +44,17 @@
 
 ## 硬性兼容约束
 
+2026-09-06 资源服务联动已批准并实现：
+
+- [x] 新采集记录增加 `collected_at`，原站发布日期保持独立。
+- [x] `resource_updated_at` 仅随资源内容或下载载荷改变；操作刷新仍使用原 `updated_at`。
+- [x] Javbee 首次成功写入载荷时确定收录时间；重复采集、迁入历史和中断写入不伪造首次收录。
+- [x] 写入路径创建 `(collected_at, _id)`、`(resource_updated_at, _id)` 索引。
+- [x] 43 项爬虫单元测试及临时 MongoDB 7.0.24 原生写入检查通过；没有修改线上数据库。
+
+上线顺序：先更新爬虫，再更新独立 Worker，最后更新 subtitleGeneration 并重建开发阶段的每日任务。
+历史记录缺失的收录时间不回填；可按原站发布日期单独补采。集合与资源身份不变。
+
 - 不迁移或合并现有 MongoDB collection schema。
 - 不改变 JavBee `source_key` 唯一键和现有字段语义。
 - 不改变 Sehuatang 的板块 collection 映射。

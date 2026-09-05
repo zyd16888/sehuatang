@@ -203,7 +203,9 @@ class JavbeeMongoRepositoryTests(unittest.TestCase):
         self.assertEqual("javbee_items", JAVBEE_COLLECTION_NAME)
         self.assertIn("uniq_source_key", [options["name"] for _, options in collection.indexes])
         self.assertTrue(collection.ordered)
-        self.assertEqual(1, len(collection.operations))
+        self.assertEqual(2, len(collection.operations))
+        self.assertTrue(collection.operations[0]._doc["$setOnInsert"]["resource_collection_pending"])
+        self.assertIsInstance(collection.operations[1]._doc, list)
         self.assertEqual(0, collection.operations[0]._doc["$setOnInsert"]["publish"])
         self.assertEqual(1, summary["upserted"])
 
@@ -242,6 +244,32 @@ class JavbeeMongoRepositoryTests(unittest.TestCase):
         self.assertNotIn("title", update["$set"])
         self.assertEqual("old title", update["$setOnInsert"]["title"])
         self.assertEqual(1, update["$set"]["complete"])
+        self.assertNotIn("collected_at", update["$setOnInsert"])
+        self.assertNotIn("resource_updated_at", update["$set"])
+
+
+class ResourceClockTests(unittest.TestCase):
+    def test_collection_clock_is_separate_from_publication(self):
+        from datetime import datetime, timezone
+        from util.resource_clock import collected_document
+        now = datetime(2026, 9, 6, tzinfo=timezone.utc)
+        result = collected_document({"tid": "1", "post_time": "2020-01-01"}, now)
+        self.assertEqual(now, result["collected_at"])
+        self.assertEqual("2020-01-01", result["post_time"])
+
+    def test_fingerprint_excludes_refresh_and_operational_metadata(self):
+        from util.resource_clock import fingerprint
+        item = {"title": "old", "magnet": None}
+        self.assertEqual(fingerprint(item), fingerprint({**item, "updated_at": "later", "publish": 1}))
+        self.assertNotEqual(fingerprint(item), fingerprint({**item, "magnet": "magnet:?new"}))
+
+    def test_payload_update_preserves_collection_and_uses_atomic_change_clock(self):
+        from util.resource_clock import resource_update_pipeline
+        stage = resource_update_pipeline({"title": "$literal-title"})[0]["$set"]
+        self.assertEqual("$$NOW", stage["collected_at"]["$cond"][1])
+        self.assertEqual({"$literal": "$literal-title"}, stage["title"])
+        self.assertEqual("$$NOW", stage["resource_updated_at"]["$cond"][1])
+        self.assertEqual("$resource_updated_at", stage["resource_updated_at"]["$cond"][2])
 
 
 class JavbeeCodeResolutionTests(unittest.TestCase):
