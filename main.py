@@ -78,6 +78,61 @@ async def main(sources=None, dry_run: bool = False):
     return results
 
 
+async def backfill_pages(
+    source: str,
+    start_page: int,
+    end_page: int,
+    *,
+    fids=None,
+    typeids=None,
+    resume: bool = False,
+    dry_run: bool = False,
+) -> bool:
+    """按页区间补抓历史数据；详情失败进失败台账，用 retry-failed 恢复。"""
+    import asyncio as _asyncio
+
+    log.info(
+        f"开始 {source} 分页补抓: 第 {start_page}-{end_page} 页"
+    )
+    success = True
+    if source == "x1080x":
+        from scrapers.x1080x_scraper import X1080XScraper
+
+        summary = await _asyncio.to_thread(
+            X1080XScraper().backfill_pages,
+            start_page,
+            end_page,
+            typeids=typeids,
+            resume=resume,
+            dry_run=dry_run,
+        )
+        log.info(f"x1080x 分页补抓完成: {summary}")
+        success = not any(
+            str(partition.get("stopped", "")).startswith("list_failed")
+            for partition in summary.get("partitions", {}).values()
+        )
+    elif source == "sehuatang":
+        selected_fids = [int(fid) for fid in (fids or fid_list)]
+        with WebScraper(dry_run=dry_run) as scraper:
+            for fid in selected_fids:
+                try:
+                    summary = await scraper.backfill_pages(
+                        fid,
+                        start_page,
+                        end_page,
+                        resume=resume,
+                    )
+                    log.info(f"板块 {fid} 分页补抓完成: {summary}")
+                    if str(summary.get("stopped", "")).startswith("list_failed"):
+                        success = False
+                except Exception as e:
+                    success = False
+                    log.error(f"板块 {fid} 分页补抓失败: {e}")
+    else:
+        raise ValueError(f"来源不支持分页补抓: {source}")
+    return success
+
+
 async def backfill(
     year: int,
     fids=None,

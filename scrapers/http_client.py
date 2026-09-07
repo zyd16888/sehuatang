@@ -13,15 +13,18 @@ from typing import Optional
 
 from curl_cffi import requests
 
+from scrapers.core.cf_challenge import (
+    CF_STATUS,
+    FlareSolverrClient,
+    is_cf_challenge,
+    merge_solution_cookies,
+)
 from scrapers.core.config import HttpSettings, load_source_settings
 from scrapers.core.http import CrawlerHttpClient
 from util.log_util import log
 from util.read_config import get_config
 
 _SAFEID_RE = re.compile(r"safeid\s*=\s*['\"]([^'\"]+)['\"]")
-_TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
-_CF_TITLE_KEYWORDS = ("just a moment", "attention required")
-_CF_STATUS = {403, 429, 503}
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -50,18 +53,22 @@ class HttpClient:
             or {}
         )
         challenge_config = source_config.get("challenge") or {}
-        self._flaresolverr_url = str(
+        flaresolverr_url = str(
             os.getenv("CRAWLER_SEHUATANG_FLARESOLVERR_URL")
             or challenge_config.get("flaresolverr_url")
             or get_config("http_client.flaresolverr_url")
             or ""
-        ).strip() or None
-        self._proxies = (
-            {
-                "http": self.settings.proxy.url,
-                "https": self.settings.proxy.url,
-            }
-            if self.settings.proxy.enabled
+        ).strip()
+        self._flaresolverr = (
+            FlareSolverrClient(
+                flaresolverr_url,
+                proxy_url=(
+                    self.settings.proxy.url
+                    if self.settings.proxy.enabled
+                    else None
+                ),
+            )
+            if flaresolverr_url
             else None
         )
 
@@ -71,7 +78,7 @@ class HttpClient:
             statuses=tuple(
                 status
                 for status in self.settings.retry.statuses
-                if status not in _CF_STATUS
+                if status not in CF_STATUS
             ),
         )
         transport_settings = replace(self.settings, retry=retry)
@@ -144,28 +151,11 @@ class HttpClient:
         if not items:
             return
         with self._cookie_lock:
-            for c in items:
-                name = str(c.get("name") or "").strip()
-                value = c.get("value")
-                if name and value is not None:
-                    self.cookie[name] = str(value)
-
-    @staticmethod
-    def _title(body: bytes) -> str:
-        m = _TITLE_RE.search(body[:5000])
-        if not m:
-            return ""
-        try:
-            return m.group(1).decode("utf-8", errors="ignore").strip()
-        except Exception:
-            return ""
+            merge_solution_cookies(self.cookie, items)
 
     @staticmethod
     def _is_cf_challenge(body: bytes, status: int) -> bool:
-        if status in _CF_STATUS:
-            return True
-        title = HttpClient._title(body).lower()
-        return any(k in title for k in _CF_TITLE_KEYWORDS)
+        return is_cf_challenge(body, status)
 
     @staticmethod
     def _is_r18_block(body: bytes) -> bool:
@@ -186,51 +176,21 @@ class HttpClient:
         return True
 
     def _bypass_cf(self, url: str, max_retry: int = 3) -> Optional[bytes]:
-        if not self._flaresolverr_url:
+        if self._flaresolverr is None:
             log.warning("未配置 flaresolverr_url，无法自动过 CF，请求放弃")
             return None
-        cookies = self._cookie_copy()
-        payload = {
-            "cmd": "request.get",
-            "url": url,
-            "maxTimeout": 60000,
-            "cookies": [{"name": k, "value": v} for k, v in cookies.items()],
-        }
-        if self._proxies and self._proxies.get("http"):
-            payload["proxy"] = {"url": self._proxies["http"]}
-        try:
-            r = requests.post(
-                self._flaresolverr_url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=90,
-            )
-            solution = (r.json() or {}).get("solution") or {}
-            if solution.get("status") != 200:
-                log.error(f"FlareSolverr 返回异常 status={solution.get('status')} url={url}")
-                return None
-
-            self._update_cookies_from_solution(solution.get("cookies"))
-            ua = solution.get("userAgent")
-            if ua:
-                self.headers["User-Agent"] = ua
-
-            html = solution.get("response") or ""
-            html = re.sub(
-                r'charset=["\']?(gbk|gb2312|big5)["\']?',
-                'charset="utf-8"',
-                html,
-                flags=re.I,
-            )
-            body = html.encode("utf-8")
-
-            if self._is_r18_block(body) and max_retry > 0:
-                if self._update_safeid_from_body(body):
-                    return self._bypass_cf(url, max_retry - 1)
-            return body
-        except Exception as e:
-            log.error(f"CF 过盾异常: {e}")
+        solution = self._flaresolverr.solve(url, cookies=self._cookie_copy())
+        if solution is None:
             return None
+        body, cookies, user_agent = solution
+        self._update_cookies_from_solution(cookies)
+        if user_agent:
+            self.headers["User-Agent"] = user_agent
+
+        if self._is_r18_block(body) and max_retry > 0:
+            if self._update_safeid_from_body(body):
+                return self._bypass_cf(url, max_retry - 1)
+        return body
 
 
 http_client = HttpClient()

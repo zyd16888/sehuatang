@@ -126,6 +126,36 @@ class ApplicationRunner:
             ExceptionHandler.handle_and_log(e, "执行 Javbee 抓取任务时出错")
             return False
 
+    def run_backfill_pages(
+        self,
+        source,
+        start_page,
+        end_page,
+        fids=None,
+        typeids=None,
+        resume=False,
+        dry_run=False,
+    ):
+        """按页区间补抓历史数据。"""
+        try:
+            import asyncio
+            from main import backfill_pages
+
+            return asyncio.run(
+                backfill_pages(
+                    source,
+                    start_page,
+                    end_page,
+                    fids=fids,
+                    typeids=typeids,
+                    resume=resume,
+                    dry_run=dry_run,
+                )
+            )
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "执行分页补抓任务时出错")
+            return False
+
     def run_crawl(
         self,
         source="all",
@@ -214,13 +244,16 @@ def create_argument_parser():
   python run.py --mode backfill --year 2025 --resume
   python run.py crawl --source javbee --dry-run
   python run.py retry-failed --source javbee
+  python run.py backfill-pages --source x1080x --end-page 200
+  python run.py backfill-pages --source x1080x --typeid 5479 --end-page 500 --resume
+  python run.py backfill-pages --source sehuatang --fid 103 --end-page 300
         """
     )
 
     parser.add_argument(
         "action",
         nargs="?",
-        choices=["crawl", "retry-failed"],
+        choices=["crawl", "retry-failed", "backfill-pages"],
         help="新式命令入口；未指定时继续使用 --mode",
     )
 
@@ -265,7 +298,26 @@ def create_argument_parser():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="从年度补抓检查点继续，仅用于 backfill 模式"
+        help="从检查点继续，用于 backfill 模式和 backfill-pages 命令"
+    )
+
+    parser.add_argument(
+        "--start-page",
+        type=int,
+        default=1,
+        help="backfill-pages: 起始列表页（默认 1）"
+    )
+
+    parser.add_argument(
+        "--end-page",
+        type=int,
+        help="backfill-pages: 结束列表页（含）"
+    )
+
+    parser.add_argument(
+        "--typeid",
+        action="append",
+        help="backfill-pages(x1080x): 分类 typeid，可重复指定；不传则全部分类"
     )
 
     return parser
@@ -304,7 +356,21 @@ def main():
 
     try:
         # 根据模式运行
-        if args.action == "crawl":
+        if args.action == "backfill-pages":
+            if args.source in (None, "all"):
+                parser.error("backfill-pages 必须指定 --source sehuatang 或 x1080x")
+            if args.end_page is None or args.end_page < args.start_page:
+                parser.error("backfill-pages 必须指定不小于 --start-page 的 --end-page")
+            success = runner.run_backfill_pages(
+                args.source,
+                args.start_page,
+                args.end_page,
+                fids=args.fid,
+                typeids=args.typeid,
+                resume=args.resume,
+                dry_run=args.dry_run,
+            )
+        elif args.action == "crawl":
             success = runner.run_crawl(
                 source=args.source or "all",
                 dry_run=args.dry_run,

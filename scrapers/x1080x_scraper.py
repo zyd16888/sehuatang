@@ -1,11 +1,13 @@
 """x1080x 抓取入口，使用公共爬虫引擎。"""
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 from scrapers.core.config import load_source_settings
+from scrapers.core.contracts import CrawlTarget
 from scrapers.core.engine import CrawlEngine
 from scrapers.core.http import CrawlerHttpClient
 from scrapers.infrastructure import build_failure_store
+from scrapers.page_backfill import FixedTargetSource, PageCheckpointStore
 from scrapers.sources.x1080x import X1080XRepository, X1080XSource
 from scrapers.sources.x1080x.http_client import X1080XHttpClient
 from util.log_util import log
@@ -70,3 +72,127 @@ class X1080XScraper:
             f"saved={result['saved']} updated={result['updated']}"
         )
         return result
+
+    def backfill_pages(
+        self,
+        start_page: int,
+        end_page: int,
+        *,
+        typeids=None,
+        resume: bool = False,
+        dry_run: bool = False,
+        checkpoint_store: Optional[PageCheckpointStore] = None,
+    ) -> Dict[str, object]:
+        """按页区间补抓历史数据。
+
+        检查点按完整处理完的页推进；详情失败进失败台账、
+        由 retry-failed 恢复，不阻塞页进度。
+        """
+        source = X1080XSource(self.config)
+        repository = X1080XRepository(
+            existing_lookup=find_existing_x1080x_keys,
+            save_func=save_x1080x_items,
+        )
+        engine = CrawlEngine(self.http, self.failure_store)
+        checkpoints = checkpoint_store or PageCheckpointStore()
+
+        selected = {
+            str(typeid): source.type_map[str(typeid)]
+            for typeid in (typeids or source.type_map)
+            if str(typeid) in source.type_map
+        }
+        if not selected:
+            raise ValueError(f"未匹配到任何 typeid: {typeids}")
+
+        summary = {
+            "source": "x1080x",
+            "start_page": start_page,
+            "end_page": end_page,
+            "pages_scanned": 0,
+            "discovered": 0,
+            "existing": 0,
+            "requested": 0,
+            "saved": 0,
+            "failed": 0,
+            "partitions": {},
+        }
+        seen_tids = set()
+
+        for typeid, section in selected.items():
+            first_page = start_page
+            if resume:
+                completed = checkpoints.load("x1080x", typeid)
+                if completed:
+                    first_page = max(start_page, completed + 1)
+                    log.info(
+                        f"x1080x 分类 {typeid} 从检查点第 {first_page} 页继续"
+                    )
+            partition_summary = {
+                "section": section,
+                "pages": 0,
+                "saved": 0,
+                "failed": 0,
+                "stopped": "",
+            }
+            summary["partitions"][typeid] = partition_summary
+
+            for page in range(first_page, end_page + 1):
+                result = self.http.fetch(source.list_url(typeid, page), stage="list")
+                if not result.ok:
+                    partition_summary["stopped"] = f"list_failed@{page}"
+                    summary["failed"] += 1
+                    log.warning(
+                        "x1080x 补抓列表页失败，该分类暂停（检查点未推进，可 --resume 继续）: "
+                        f"typeid={typeid} page={page} error_type={result.error_type}"
+                    )
+                    break
+
+                tids = source.parser.parse_list(result.body)
+                if not tids:
+                    partition_summary["stopped"] = f"exhausted@{page}"
+                    log.info(f"x1080x 分类 {typeid} 第 {page} 页无内容，视为到底")
+                    break
+
+                targets = []
+                for tid in tids:
+                    if tid in seen_tids:
+                        continue
+                    seen_tids.add(tid)
+                    targets.append(
+                        CrawlTarget(
+                            key=str(tid),
+                            url=source.detail_url(tid),
+                            partition=typeid,
+                            metadata={
+                                "tid": tid,
+                                "typeid": typeid,
+                                "section": section,
+                            },
+                        )
+                    )
+
+                page_run = engine.run(
+                    FixedTargetSource(source, targets),
+                    repository,
+                    dry_run=dry_run,
+                )
+                summary["pages_scanned"] += 1
+                summary["discovered"] += len(targets)
+                summary["existing"] += repository.existing_count
+                summary["requested"] += page_run.requested
+                summary["saved"] += page_run.saved
+                summary["failed"] += page_run.failed
+                partition_summary["pages"] += 1
+                partition_summary["saved"] += page_run.saved
+                partition_summary["failed"] += page_run.failed
+
+                if not dry_run:
+                    checkpoints.save("x1080x", typeid, page)
+
+        log.info(
+            "x1080x 分页补抓结束: "
+            f"pages={summary['pages_scanned']} discovered={summary['discovered']} "
+            f"existing={summary['existing']} requested={summary['requested']} "
+            f"saved={summary['saved']} failed={summary['failed']}"
+        )
+        return summary

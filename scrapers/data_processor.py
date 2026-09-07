@@ -11,9 +11,15 @@ from util.config import date
 class DataProcessor:
     """数据处理器类"""
 
-    def __init__(self, target_date: Optional[str] = None):
+    def __init__(
+        self,
+        target_date: Optional[str] = None,
+        date_filter: bool = True,
+    ):
         self.log = log
         self.target_date = target_date
+        # 分页补抓不限定日期，置 False 跳过发布时间匹配
+        self.date_filter = date_filter
 
     def merge_thread_data(self, thread_details: List[tuple], _: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -46,7 +52,9 @@ class DataProcessor:
             }
 
             # 验证发布时间是否匹配目标日期
-            if self._is_valid_post_time(merged_item.get("post_time", "")):
+            if not self.date_filter or self._is_valid_post_time(
+                merged_item.get("post_time", "")
+            ):
                 merged_data.append(merged_item)
             else:
                 self.log.debug(f"帖子 {merged_item.get('tid')} 发布时间不匹配，跳过")

@@ -215,6 +215,107 @@ class WebScraper:
 
         return summary
 
+    async def backfill_pages(
+        self,
+        fid: int,
+        start_page: int,
+        end_page: int,
+        resume: bool = False,
+        checkpoint_store=None,
+    ) -> Dict[str, Any]:
+        """按页区间补抓板块历史数据（不做日期过滤）。
+
+        列表按发帖时间倒序翻页，跳过已入库的 tid；详情失败写入
+        失败台账由 retry-failed 恢复，不阻塞页检查点推进。
+        """
+        from scrapers.page_backfill import PageCheckpointStore
+
+        self.data_processor.date_filter = False
+        checkpoints = checkpoint_store or PageCheckpointStore()
+        partition = str(fid)
+
+        first_page = start_page
+        if resume:
+            completed = checkpoints.load("sehuatang", partition)
+            if completed:
+                first_page = max(start_page, completed + 1)
+                self.log.info(f"板块 {fid} 从检查点第 {first_page} 页继续")
+
+        summary = {
+            "source": "sehuatang",
+            "fid": fid,
+            "start_page": start_page,
+            "end_page": end_page,
+            "pages_scanned": 0,
+            "discovered": 0,
+            "requested": 0,
+            "saved": 0,
+            "failed": 0,
+            "stopped": "",
+        }
+
+        for page in range(first_page, end_page + 1):
+            url = self._build_plate_url(fid, page, ordered_by_dateline=True)
+            body = self.http.get_html(url)
+            if not body:
+                summary["stopped"] = f"list_failed@{page}"
+                summary["failed"] += 1
+                self.log.warning(
+                    "板块补抓列表页失败，暂停（检查点未推进，可 --resume 继续）: "
+                    f"fid={fid} page={page}"
+                )
+                break
+
+            info_list = self.page_parser.parse_plate_page_all(body)
+            if not info_list:
+                summary["stopped"] = f"exhausted@{page}"
+                self.log.info(f"板块 {fid} 第 {page} 页无主题，视为到底")
+                break
+
+            for info in info_list:
+                info["fid"] = fid
+            tid_list = [str(info["tid"]) for info in info_list]
+            summary["pages_scanned"] += 1
+            summary["discovered"] += len(tid_list)
+
+            new_tid_list, new_info_list = self.data_manager.compare_existing_data(
+                tid_list,
+                fid,
+                info_list,
+            )
+            summary["requested"] += len(new_tid_list)
+
+            if new_info_list:
+                detailed_data, failure_count = self._get_thread_details_batch_result(
+                    new_info_list
+                )
+                summary["failed"] += failure_count
+                if detailed_data:
+                    saved_data = self.data_manager.filter_and_save_data(
+                        detailed_data,
+                        fid,
+                        strict=True,
+                        dry_run=self.dry_run,
+                    )
+                    summary["saved"] += len(saved_data)
+                    if not self.dry_run:
+                        self._clear_detail_failures(detailed_data)
+
+            if not self.dry_run:
+                checkpoints.save("sehuatang", partition, page)
+            self.log.info(
+                f"板块 {fid} 分页补抓进度: 第 {page} 页，"
+                f"发现 {len(tid_list)} 条，新增请求 {len(new_tid_list)} 条"
+            )
+
+        self.log.info(
+            "板块分页补抓结束: "
+            f"fid={fid} pages={summary['pages_scanned']} "
+            f"discovered={summary['discovered']} requested={summary['requested']} "
+            f"saved={summary['saved']} failed={summary['failed']}"
+        )
+        return summary
+
     @staticmethod
     def _checkpoint_path() -> Path:
         return Path(__file__).resolve().parent.parent / "data" / "backfill_progress.json"

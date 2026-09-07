@@ -127,7 +127,13 @@ python run.py crawl --source javbee --dry-run
 python run.py retry-failed --source javbee
 python run.py retry-failed --source sehuatang
 
-# Sehuatang 年度补抓
+# 按页区间补抓历史数据（推荐）
+python run.py backfill-pages --source x1080x --end-page 200
+python run.py backfill-pages --source x1080x --typeid 5479 --end-page 500 --resume
+python run.py backfill-pages --source sehuatang --fid 103 --end-page 300
+python run.py backfill-pages --source sehuatang --fid 103 --end-page 300 --dry-run
+
+# Sehuatang 年度补抓（旧方案，按年份二分定位）
 python run.py --mode backfill --year 2025
 python run.py --mode backfill --year 2025 --fid 103 --fid 104
 python run.py --mode backfill --year 2025 --resume
@@ -138,6 +144,11 @@ python run.py --mode once
 python run.py --mode javbee
 python run.py --mode health
 ```
+
+`backfill-pages` 按页区间补抓：跳过已入库数据、不做日期过滤，检查点按完整
+处理完的页推进（保存在 `data/page_backfill_progress.json`，键为
+`source:partition`）。详情失败写入失败台账、由 `retry-failed` 恢复，不阻塞页
+进度；列表页失败则该分区暂停且检查点不推进，可用 `--resume` 继续。
 
 年度补抓按发帖时间二分定位页码范围。进度保存在
 `data/backfill_progress.json`；任何详情获取、解析或必要字段校验失败都会暂停推进
@@ -221,7 +232,8 @@ mamba run -n ame python -m unittest `
   tests.backfill_tests `
   tests.sehuatang_source_tests `
   tests.extract_and_query_tests `
-  tests.x1080x_tests
+  tests.x1080x_tests `
+  tests.page_backfill_tests
 
 mamba run -n ame python -m compileall -q main.py run.py scrapers util tests
 python run.py --mode health
