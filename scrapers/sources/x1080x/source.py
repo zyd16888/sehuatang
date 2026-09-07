@@ -1,4 +1,6 @@
 """x1080x 来源模块（Discuz archiver 模式，游客可访问，无需论坛账号）。"""
+import re
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from scrapers.core.contracts import (
@@ -54,6 +56,32 @@ class X1080XSource:
     def detail_url(self, tid: int) -> str:
         return f"{self.base_url}/forum.php?mod=viewthread&tid={tid}&archiver=1"
 
+    def dump_empty_list_page(self, typeid: str, page: int, body) -> None:
+        """首个列表页就解析出 0 条时留现场：告警并把响应体落盘。
+
+        正常「到底」只会发生在深分页；首页为空大概率是页面结构变化、
+        镜像域名跳转页或过盾返回了非目标内容，靠 dump 文件排查。
+        """
+        raw = body or b""
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8", "ignore")
+        match = re.search(rb"<title[^>]*>(.*?)</title>", raw[:5000], re.I | re.S)
+        title = match.group(1).decode("utf-8", "ignore").strip() if match else ""
+        dump_note = ""
+        try:
+            debug_dir = Path(__file__).resolve().parents[3] / "data" / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            dump_path = debug_dir / f"x1080x_list_{typeid}_p{page}.html"
+            dump_path.write_bytes(raw)
+            dump_note = f" dump={dump_path}"
+        except OSError as exc:
+            dump_note = f" dump_failed={exc}"
+        log.warning(
+            "x1080x 列表页解析为 0 条（疑似结构变化或非目标页面）: "
+            f"typeid={typeid} page={page} bytes={len(raw)} "
+            f"title={title!r}{dump_note}"
+        )
+
     def discover(
         self,
         context: CrawlContext,
@@ -80,6 +108,20 @@ class X1080XSource:
 
                 pages_fetched += 1
                 tids = self.parser.parse_list(result.body)
+                if not tids and page == 1:
+                    # 首页 0 条多为过盾返回了中间态页面（byparr 并发时会发生），
+                    # 重试一次再定论；仍为空则留诊断现场。
+                    log.warning(
+                        f"x1080x 分类 {typeid} 首页解析为 0 条，重试一次"
+                    )
+                    retry_fetch = http.fetch(
+                        self.list_url(typeid, page), stage="list"
+                    )
+                    if retry_fetch.ok:
+                        result = retry_fetch
+                        tids = self.parser.parse_list(result.body)
+                    if not tids:
+                        self.dump_empty_list_page(typeid, page, result.body)
                 if not tids:
                     # 空页视为该分类到底，不再翻后续页。
                     break

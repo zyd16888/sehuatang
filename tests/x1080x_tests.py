@@ -176,6 +176,34 @@ class X1080XSourceTests(unittest.TestCase):
             dict(target.metadata),
         )
 
+    def test_discover_retries_once_when_first_page_parses_empty(self):
+        # 首页第一次拿到无列表内容的中间态页面（过盾偶发），重试后恢复
+        source = self._source(page_limit=1)
+        interim = b"<html><title>loading</title><body></body></html>"
+        calls = []
+
+        class FlakyHttp:
+            def fetch(self, url, stage="detail"):
+                calls.append(url)
+                body = interim if calls.count(url) == 1 else LIST_HTML
+                return FetchResult(
+                    url=url,
+                    body=body,
+                    status_code=200,
+                    attempts=1,
+                    elapsed_ms=0,
+                )
+
+        discovery = source.discover(
+            CrawlContext(source="x1080x", run_id="test"),
+            FlakyHttp(),
+        )
+
+        self.assertEqual(2, len(discovery.targets))
+        # 每个分类首页各请求了两次（原始 + 重试）
+        for typeid in TYPE_MAP:
+            self.assertEqual(2, calls.count(source.list_url(typeid, 1)))
+
     def test_discover_raises_when_all_lists_fail(self):
         source = self._source()
         with self.assertRaises(RuntimeError):

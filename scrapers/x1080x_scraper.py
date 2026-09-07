@@ -176,6 +176,19 @@ class X1080XScraper:
                     break
 
                 tids = source.parser.parse_list(result.body)
+                if not tids and page == first_page:
+                    # 与增量 discover 一致：首个页面 0 条先重试一次再定论。
+                    log.warning(
+                        f"x1080x 分类 {typeid} 第 {page} 页解析为 0 条，重试一次"
+                    )
+                    retry_fetch = self.http.fetch(
+                        source.list_url(typeid, page), stage="list"
+                    )
+                    if retry_fetch.ok:
+                        result = retry_fetch
+                        tids = source.parser.parse_list(result.body)
+                    if not tids:
+                        source.dump_empty_list_page(typeid, page, result.body)
                 if not tids:
                     partition_summary["stopped"] = f"exhausted@{page}"
                     log.info(f"x1080x 分类 {typeid} 第 {page} 页无内容，视为到底")

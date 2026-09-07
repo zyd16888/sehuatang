@@ -4,11 +4,17 @@
 后续请求直连复用，仅在 Cookie 失效重新触发挑战时再次过盾。
 """
 import re
+import threading
 from typing import Iterable, Mapping, Optional
 
 from curl_cffi import requests
 
 from util.log_util import log
+
+# FlareSolverr/byparr 是单浏览器实例，并发解题会互相干扰
+# （实测 3-4 个并发只有 1-2 个成功，其余内部超时或返回中间态页面）。
+# 进程级全局锁让所有来源/实例的过盾请求串行排队。
+_GLOBAL_SOLVE_LOCK = threading.Lock()
 
 CF_STATUS = (403, 429, 503)
 _CF_TITLE_KEYWORDS = ("just a moment", "attention required")
@@ -43,15 +49,28 @@ class FlareSolverrClient:
         endpoint: str,
         *,
         proxy_url: Optional[str] = None,
-        max_timeout_ms: int = 60000,
-        request_timeout: float = 90.0,
+        max_timeout_ms: int = 120000,
+        request_timeout: Optional[float] = None,
     ):
         self.endpoint = endpoint.strip().rstrip("/")
         self.proxy_url = proxy_url or None
         self.max_timeout_ms = int(max_timeout_ms)
-        self.request_timeout = float(request_timeout)
+        # 未显式指定时跟随解题预算，另留 30s 网络往返余量
+        self.request_timeout = (
+            float(request_timeout)
+            if request_timeout is not None
+            else self.max_timeout_ms / 1000 + 30
+        )
 
     def solve(
+        self,
+        url: str,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Optional[tuple[bytes, list, Optional[str]]]:
+        with _GLOBAL_SOLVE_LOCK:
+            return self._solve_locked(url, cookies)
+
+    def _solve_locked(
         self,
         url: str,
         cookies: Optional[Mapping[str, str]] = None,
