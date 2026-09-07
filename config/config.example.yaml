@@ -8,14 +8,6 @@ mongodb:
   connection_string: "mongodb+srv://username:password@cluster.mongodb.net/database"
   use_conn_str: true
 
-mysql:
-  enable: false
-  host: "localhost"
-  port: 3306
-  user: "your_username"
-  password: "your_password"
-  db: "sehuatang"
-
 sehuatang:
   # 域名
   domain_name: "sehuatang.org"

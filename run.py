@@ -158,20 +158,6 @@ class ApplicationRunner:
             ExceptionHandler.handle_and_log(e, "执行来源抓取任务时出错")
             return False
 
-    def run_bot(self):
-        """运行Telegram Bot"""
-        try:
-            log.info("🤖 启动Telegram Bot...")
-
-            from bot import run as run_bot
-            run_bot()
-
-        except Exception as e:
-            ExceptionHandler.handle_and_log(e, "运行Telegram Bot时出错")
-            return False
-
-        return True
-
     def stop(self):
         """停止应用程序"""
         log.info("正在停止应用程序...")
@@ -214,7 +200,6 @@ def create_argument_parser():
 运行模式说明:
   scheduler  - 定时调度模式（默认）
   once      - 单次执行模式
-  bot       - Telegram Bot模式
   health    - 健康检查模式
   backfill  - 按年份补抓历史数据
   javbee    - 单独抓取 Javbee 数据源
@@ -222,7 +207,6 @@ def create_argument_parser():
 示例:
   python run.py                    # 运行调度器
   python run.py --mode once        # 执行一次任务
-  python run.py --mode bot         # 运行Telegram Bot
   python run.py --mode health      # 健康检查
   python run.py --mode javbee      # 单独抓取 Javbee
   python run.py --mode backfill --year 2025
@@ -242,7 +226,7 @@ def create_argument_parser():
 
     parser.add_argument(
         "--mode",
-        choices=["scheduler", "once", "bot", "health", "backfill", "javbee"],
+        choices=["scheduler", "once", "health", "backfill", "javbee"],
         default="scheduler",
         help="运行模式 (默认: scheduler)"
     )
@@ -333,8 +317,6 @@ def main():
             )
         elif args.mode == "once":
             success = runner.run_once(dry_run=args.dry_run)
-        elif args.mode == "bot":
-            success = runner.run_bot()
         elif args.mode == "health":
             success = runner.health_check()
         elif args.mode == "backfill":

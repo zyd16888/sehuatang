@@ -72,7 +72,7 @@ python run.py retry-failed --source javbee
 python run.py retry-failed --source sehuatang
 ```
 
-`--mode once|javbee|backfill|bot|health` 继续兼容。新配置使用
+`--mode once|javbee|backfill|health` 继续兼容。新配置使用
 `crawler.sources.<source>.schedule.cron` 为每个来源创建独立任务；未配置来源级
 cron 时，调度器回退到旧的统一 `schedule.schedule_cron`。
 

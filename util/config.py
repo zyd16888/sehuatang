@@ -15,14 +15,6 @@ mongodb_use_conn_str = get_config(
     mongodb.get("use_conn_str"),
 )
 
-mysql = get_config("mysql", {}) or {}
-mysql_enable = get_config("mysql.enable", mysql.get("enable"))
-mysql_host = get_config("mysql.host", mysql.get("host"))
-mysql_port = get_config("mysql.port", mysql.get("port"))
-mysql_user = get_config("mysql.user", mysql.get("user"))
-mysql_passwd = get_config("mysql.password", mysql.get("password"))
-mysql_db = get_config("mysql.db", mysql.get("db"))
-
 domain = get_config("domain_name")
 cookie = get_config("cookie")
 fid_json = get_config("fid")

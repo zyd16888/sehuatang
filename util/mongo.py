@@ -337,7 +337,7 @@ def find_due_crawl_failures(source, now=None, collection=None, limit=500):
     return list(rows)
 
 
-def save_javbee_items(data_list, collection=None, preserve_existing=False):
+def save_javbee_items(data_list, collection=None):
     """按 Javbee 详情页标识幂等写入 javbee_items。"""
     if not data_list:
         return {"processed": 0, "matched": 0, "modified": 0, "upserted": 0}
@@ -356,55 +356,23 @@ def save_javbee_items(data_list, collection=None, preserve_existing=False):
             raise ValueError(f"javbee 数据缺少 date: {item['url']}")
 
         document = dict(item)
-        if preserve_existing:
-            metadata_fields = {
-                "legacy_mysql_id",
-                "complete",
-                "ised2k",
-                "publish",
-                "migrated_at",
-            }
-            set_fields = {
-                key: value
-                for key, value in document.items()
-                if key in metadata_fields
-            }
-            set_fields["updated_at"] = now
-            insert_fields = {
-                key: value
-                for key, value in document.items()
-                if key not in metadata_fields
-            }
-            insert_fields["created_at"] = now
-        else:
-            # Insert provenance first. Until the following atomic payload update
-            # succeeds, the row has no resource_updated_at and is not incremental.
-            insert_fields = {"created_at": now, "resource_collection_pending": True}
-            for field in ("complete", "ised2k", "publish"):
-                if field not in document:
-                    insert_fields[field] = 0
-            operations.append(pymongo.UpdateOne(
-                {"source_key": document["source_key"]},
-                {"$setOnInsert": insert_fields}, upsert=True))
-            operations.append(pymongo.UpdateOne(
-                {"source_key": document["source_key"]}, resource_update_pipeline(document)))
-            continue
-        operations.append(
-            pymongo.UpdateOne(
-                {"source_key": document["source_key"]},
-                {
-                    "$set": set_fields,
-                    "$setOnInsert": insert_fields,
-                },
-                upsert=True,
-            )
-        )
+        # Insert provenance first. Until the following atomic payload update
+        # succeeds, the row has no resource_updated_at and is not incremental.
+        insert_fields = {"created_at": now, "resource_collection_pending": True}
+        for field in ("complete", "ised2k", "publish"):
+            if field not in document:
+                insert_fields[field] = 0
+        operations.append(pymongo.UpdateOne(
+            {"source_key": document["source_key"]},
+            {"$setOnInsert": insert_fields}, upsert=True))
+        operations.append(pymongo.UpdateOne(
+            {"source_key": document["source_key"]}, resource_update_pipeline(document)))
 
     result = collection.bulk_write(operations, ordered=True)
     summary = {
         "processed": len(data_list),
-        "matched": result.matched_count if preserve_existing else max(0, result.matched_count - len(data_list)),
-        "modified": result.modified_count if preserve_existing else max(0, result.modified_count - result.upserted_count),
+        "matched": max(0, result.matched_count - len(data_list)),
+        "modified": max(0, result.modified_count - result.upserted_count),
         "upserted": result.upserted_count,
     }
     log.info(

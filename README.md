@@ -132,7 +132,6 @@ python run.py --mode backfill --year 2025 --resume --dry-run
 # 兼容入口
 python run.py --mode once
 python run.py --mode javbee
-python run.py --mode bot
 python run.py --mode health
 ```
 
@@ -157,7 +156,7 @@ MongoDB 启用时，终态详情失败写入 `crawl_failures` collection；否�
 
 ## 数据存储
 
-Sehuatang 保留现有按板块分 collection 的结构，可使用 MongoDB 或 MySQL。
+Sehuatang 保留现有按板块分 collection 的结构，使用 MongoDB 存储。
 JavBee 固定写入 MongoDB `javbee_items`，以 `source_key` 唯一索引幂等 upsert。
 本次多来源重构不合并或迁移现有业务 collection schema。
 
@@ -177,45 +176,7 @@ $env:CRAWLER_SEHUATANG_FLARESOLVERR_URL = "http://flaresolverr:8191/v1"
 docker compose --profile flaresolverr up -d
 ```
 
-## JavBee 历史数据维护
-
-旧 MySQL `javbee` 表迁移到 MongoDB：
-
-```powershell
-$env:JAVBEE_MYSQL_PASSWORD = "your-password"
-
-# 先抽样，只读
-python scripts\migrate_javbee_mysql_to_mongodb.py --dry-run --limit 100
-
-# 抽样写入，再执行全量
-python scripts\migrate_javbee_mysql_to_mongodb.py --limit 100
-python scripts\migrate_javbee_mysql_to_mongodb.py --batch-size 1000
-
-Remove-Item Env:\JAVBEE_MYSQL_PASSWORD
-```
-
-脚本按 MySQL `id` 分页并使用 upsert，可通过 `--resume-after-id` 继续。迁移重跑
-只补充旧数据标识和处理状态，不会用旧快照覆盖爬虫刷新后的源字段。
-
-补全缺失番号：
-
-```powershell
-$env:MYSQL_HOST = "127.0.0.1"
-$env:MYSQL_PORT = "3306"
-$env:MYSQL_USER = "readonly"
-$env:MYSQL_PASSWORD = "your-password"
-$env:MYSQL_DATABASE = "18R"
-
-# 默认只读，先审阅统计和逐条变更
-python scripts\backfill_javbee_codes.py --limit 100
-python scripts\backfill_javbee_codes.py
-
-# 只写高置信度；中置信度必须显式开启
-python scripts\backfill_javbee_codes.py --apply
-python scripts\backfill_javbee_codes.py --include-medium --apply
-```
-
-详细脚本用途见 [scripts/README.md](scripts/README.md)。
+脚本用途见 [scripts/README.md](scripts/README.md)。
 
 ## 项目结构
 

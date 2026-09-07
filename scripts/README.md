@@ -2,14 +2,6 @@
 
 脚本按用途保留在本目录，均应从项目根目录运行。
 
-## JavBee 数据维护
-
-- `migrate_javbee_mysql_to_mongodb.py`：旧 MySQL `javbee` 表幂等迁移到 MongoDB。
-- `backfill_javbee_codes.py`：基于旧 MySQL 标题补全或纠正 MongoDB 番号。
-
-这两个脚本默认提供只读或 `--dry-run` 路径。正式写入前先用小 `--limit` 抽样，
-数据库密码只通过环境变量或交互输入传递。
-
 ## 数据查询生成
 
 - `extract_and_query.py`：读取 `scripts/list.txt` 中的“番号 + 标题”，生成跨

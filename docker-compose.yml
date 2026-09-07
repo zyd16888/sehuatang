@@ -59,29 +59,6 @@ services:
     networks:
       - crawler_network
 
-  # Telegram Bot (可选，使用 --profile bot 启动)
-  telegram-bot:
-    image: cxsz16888/sehuatang:latest
-    container_name: sehuatang-bot
-    restart: unless-stopped
-    profiles: ["bot"]
-
-    command: ["python", "run.py", "--mode", "bot"]
-
-    environment:
-      - PYTHONUNBUFFERED=1
-      - TZ=Asia/Shanghai
-
-    volumes:
-      - ./config:/app/config:ro
-      - ./logs:/app/logs
-
-    networks:
-      - crawler_network
-
-    depends_on:
-      - sehuatang-crawler
-
 # 网络配置
 networks:
   crawler_network:
