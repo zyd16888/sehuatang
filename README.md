@@ -1,11 +1,14 @@
 # 多来源数据抓取系统
 
 这是一个基于 Python 3.11、`curl_cffi` 和 BeautifulSoup 的多来源爬虫系统。
-当前包含两个来源：
+当前包含三个来源：
 
 - `sehuatang`：按论坛板块抓取主题，支持年度历史补抓、R18 safeid 和可选
   FlareSolverr。
 - `javbee`：抓取最新列表及详情，支持按新数据、全量或过期时间刷新。
+- `x1080x`：通过 Discuz archiver 模式抓取（游客可访问，无需论坛账号），
+  站点有 Cloudflare JS 挑战，必须配置 FlareSolverr；过盾 Cookie 会被缓存，
+  后续请求直连复用。
 
 两个来源共用请求重试、日志、运行状态、失败恢复、CLI 和调度器，但分别保留
 自己的代理、并发、超时、解析器、数据 schema 和业务策略。
@@ -114,6 +117,7 @@ python run.py
 # 运行一个或全部来源
 python run.py crawl --source sehuatang
 python run.py crawl --source javbee
+python run.py crawl --source x1080x
 python run.py crawl --source all
 
 # 真实访问并解析，但不写库、不通知、不推进 checkpoint
@@ -159,6 +163,16 @@ MongoDB 启用时，终态详情失败写入 `crawl_failures` collection；否�
 Sehuatang 保留现有按板块分 collection 的结构，使用 MongoDB 存储。
 JavBee 固定写入 MongoDB `javbee_items`，以 `source_key` 唯一索引幂等 upsert。
 本次多来源重构不合并或迁移现有业务 collection schema。
+
+x1080x 写入单一 collection `x1080x_items`，分区（typeid/section）作为文档
+字段而不是分表：
+
+- `source_key`（=tid）唯一索引，幂等 upsert；
+- `(typeid, date)` 复合索引支持分区内按发布日期查询；
+- `(date, tid)`、`(code_normalized, date)` 支持按日期、按番号查询；
+- `collected_at` / `resource_updated_at` 时钟契约与 `javbee_items` 一致，
+  typeid/section 归类变化也会推进有效变更时间；
+- `magnet` 存主磁链（字符串），`magnets` 存全部磁链，`img` 存预览图列表。
 
 ## Docker
 
@@ -206,7 +220,8 @@ mamba run -n ame python -m unittest `
   tests.javbee_tests `
   tests.backfill_tests `
   tests.sehuatang_source_tests `
-  tests.extract_and_query_tests
+  tests.extract_and_query_tests `
+  tests.x1080x_tests
 
 mamba run -n ame python -m compileall -q main.py run.py scrapers util tests
 python run.py --mode health

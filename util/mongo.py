@@ -4,7 +4,11 @@ import pymongo
 from datetime import datetime, timedelta, timezone
 from util.log_util import log
 from util.config import date, mongodb_host, mongodb_port, mongodb_conn_str, mongodb_use_conn_str
-from util.resource_clock import collected_document, resource_update_pipeline
+from util.resource_clock import (
+    RESOURCE_FIELDS,
+    collected_document,
+    resource_update_pipeline,
+)
 
 if mongodb_use_conn_str:
     client = pymongo.MongoClient(mongodb_conn_str)
@@ -16,7 +20,11 @@ send_context_str = "本次抓取的结果如下：\n"
 db = client.sehuatang
 
 JAVBEE_COLLECTION_NAME = "javbee_items"
+X1080X_COLLECTION_NAME = "x1080x_items"
 CRAWL_FAILURE_COLLECTION_NAME = "crawl_failures"
+
+# x1080x 的 typeid/section 归类变化也算有效资源变更；magnets 覆盖多磁链场景。
+X1080X_RESOURCE_FIELDS = RESOURCE_FIELDS + ("magnets", "typeid", "section")
 
 
 # 枚举，通过fid获取板块名称
@@ -377,6 +385,98 @@ def save_javbee_items(data_list, collection=None):
     }
     log.info(
         "MongoDB 保存 javbee_items 完成: "
+        f"processed={summary['processed']} matched={summary['matched']} "
+        f"modified={summary['modified']} upserted={summary['upserted']}"
+    )
+    return summary
+
+
+def get_x1080x_collection():
+    return db[X1080X_COLLECTION_NAME]
+
+
+def ensure_x1080x_indexes(collection=None):
+    """创建 x1080x_items 所需索引；重复调用是安全的。"""
+    if collection is None:
+        collection = get_x1080x_collection()
+
+    ensure_resource_clock_indexes(collection)
+
+    collection.create_index(
+        [("source_key", pymongo.ASCENDING)],
+        unique=True,
+        name="uniq_source_key",
+    )
+    # 分区查主索引：typeid + 发布日期
+    collection.create_index(
+        [("typeid", pymongo.ASCENDING), ("date", pymongo.DESCENDING)],
+        name="idx_typeid_date",
+    )
+    collection.create_index(
+        [("date", pymongo.DESCENDING), ("tid", pymongo.DESCENDING)],
+        name="idx_date_tid",
+    )
+    collection.create_index(
+        [("code_normalized", pymongo.ASCENDING), ("date", pymongo.DESCENDING)],
+        name="idx_code_normalized_date",
+    )
+
+
+def find_existing_x1080x_keys(source_keys, collection=None):
+    """返回候选 source_key 中已入库的集合。"""
+    if not source_keys:
+        return set()
+    if collection is None:
+        collection = get_x1080x_collection()
+
+    rows = collection.find(
+        {"source_key": {"$in": list(dict.fromkeys(source_keys))}},
+        {"_id": 0, "source_key": 1},
+    )
+    return {row["source_key"] for row in rows if row.get("source_key")}
+
+
+def save_x1080x_items(data_list, collection=None):
+    """按帖子 tid 幂等写入 x1080x_items，时钟语义与 javbee_items 一致。"""
+    if not data_list:
+        return {"processed": 0, "matched": 0, "modified": 0, "upserted": 0}
+    if collection is None:
+        collection = get_x1080x_collection()
+
+    for item in data_list:
+        for required in ("source_key", "tid", "title", "date"):
+            if not item.get(required):
+                raise ValueError(
+                    f"x1080x 数据缺少 {required}: {item.get('url') or item}"
+                )
+
+    ensure_x1080x_indexes(collection)
+    now = datetime.now(timezone.utc)
+    operations = []
+    for item in data_list:
+        document = dict(item)
+        # Insert provenance first. Until the following atomic payload update
+        # succeeds, the row has no resource_updated_at and is not incremental.
+        operations.append(pymongo.UpdateOne(
+            {"source_key": document["source_key"]},
+            {"$setOnInsert": {
+                "created_at": now,
+                "resource_collection_pending": True,
+            }},
+            upsert=True))
+        operations.append(pymongo.UpdateOne(
+            {"source_key": document["source_key"]},
+            resource_update_pipeline(document, fields=X1080X_RESOURCE_FIELDS)))
+
+    result = collection.bulk_write(operations, ordered=True)
+    summary = {
+        "processed": len(data_list),
+        "matched": max(0, result.matched_count - len(data_list)),
+        "modified": max(0, result.modified_count - result.upserted_count),
+        "upserted": result.upserted_count,
+    }
+    log.info(
+        "MongoDB 保存 x1080x_items 完成: "
         f"processed={summary['processed']} matched={summary['matched']} "
         f"modified={summary['modified']} upserted={summary['upserted']}"
     )

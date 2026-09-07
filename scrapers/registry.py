@@ -101,6 +101,32 @@ async def _run_javbee(
     )
 
 
+async def _run_x1080x(
+    config: Mapping[str, Any],
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    retry_failed: bool = False,
+) -> Dict[str, Any]:
+    from util.read_config import get_config
+
+    mongodb_enabled = get_config(
+        "mongodb.enable",
+        (config.get("mongodb") or {}).get("enable", False),
+    )
+    if not mongodb_enabled:
+        raise RuntimeError("x1080x 数据源要求启用 MongoDB")
+    from scrapers.x1080x_scraper import X1080XScraper
+
+    source_config = _source_config(config, "x1080x")
+    scraper = X1080XScraper(config=source_config)
+    return await asyncio.to_thread(
+        scraper.crawl,
+        dry_run=dry_run,
+        retry_failed=retry_failed,
+    )
+
+
 class SourceRegistry:
     def __init__(self):
         self._sources: Dict[str, SourceDefinition] = {}
@@ -167,3 +193,4 @@ class SourceRegistry:
 source_registry = SourceRegistry()
 source_registry.register(SourceDefinition("sehuatang", _run_sehuatang, True))
 source_registry.register(SourceDefinition("javbee", _run_javbee, False))
+source_registry.register(SourceDefinition("x1080x", _run_x1080x, False))

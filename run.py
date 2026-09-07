@@ -239,7 +239,7 @@ def create_argument_parser():
 
     parser.add_argument(
         "--source",
-        choices=["all", "sehuatang", "javbee"],
+        choices=["all", "sehuatang", "javbee", "x1080x"],
         help="crawl/retry-failed 的数据来源",
     )
 

@@ -10,21 +10,21 @@ RESOURCE_FIELDS = (
 )
 
 
-def fingerprint(document):
-    values = {key: document.get(key) for key in RESOURCE_FIELDS}
+def fingerprint(document, fields=RESOURCE_FIELDS):
+    values = {key: document.get(key) for key in fields}
     return hashlib.sha256(json.dumps(values, sort_keys=True, ensure_ascii=False,
                                     default=str).encode("utf-8")).hexdigest()
 
 
-def collected_document(document, now=None):
+def collected_document(document, now=None, fields=RESOURCE_FIELDS):
     now = now or datetime.now(timezone.utc)
     return {**document, "collected_at": now, "resource_updated_at": now,
-            "resource_fingerprint": fingerprint(document)}
+            "resource_fingerprint": fingerprint(document, fields)}
 
 
-def resource_update_pipeline(document):
+def resource_update_pipeline(document, fields=RESOURCE_FIELDS):
     """Run after the insert-only provenance upsert, so existing clocks survive."""
-    digest = fingerprint(document)
+    digest = fingerprint(document, fields)
     return [{"$set": {
         **{key: {"$literal": value} for key, value in document.items()
            if key not in {"_id", "created_at", "collected_at", "resource_updated_at", "resource_fingerprint", "resource_collection_pending"}},

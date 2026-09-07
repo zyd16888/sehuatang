@@ -17,5 +17,6 @@ python scripts/extract_and_query.py
 
 - `diagnostics/http_smoke.py`：只读验证 Sehuatang 列表页与一个详情页。
 - `diagnostics/source_smoke.py`：只读执行少量列表、详情解析，不写数据库。
+- `diagnostics/x1080x_probe.py`：只读探测 x1080x 镜像域名连通性与 CF 挑战。
 
 诊断脚本会真实访问站点，只在需要排查网络或解析问题时手工运行。
