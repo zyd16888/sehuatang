@@ -8,6 +8,8 @@ venv/
 build/
 *.spec
 *.html
+# 管理页前端不受 *.html 规则影响
+!web/index.html
 config.yaml
 util/renamefile.py
 cfproxy.py

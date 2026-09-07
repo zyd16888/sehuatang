@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>爬虫管理</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --line: #e3e6ea; --text: #24292f;
+    --muted: #6b7280; --accent: #2563eb; --ok: #16a34a; --warn: #d97706;
+    --err: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px; background: var(--card); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px 20px 60px; }
+  section { margin-top: 20px; }
+  h2 { font-size: 15px; margin: 0 0 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px 14px;
+  }
+  .card .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .card h3 { margin: 0; font-size: 15px; }
+  .badge {
+    font-size: 12px; padding: 1px 8px; border-radius: 10px;
+    background: var(--line); color: var(--muted);
+  }
+  .badge.on { background: #dcfce7; color: var(--ok); }
+  .badge.run { background: #dbeafe; color: var(--accent); }
+  .badge.err { background: #fee2e2; color: var(--err); }
+  .meta { color: var(--muted); font-size: 12px; margin: 6px 0; }
+  button {
+    font: inherit; font-size: 13px; padding: 4px 12px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--card); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { opacity: .9; color: #fff; }
+  button.danger { color: var(--err); }
+  button.danger:hover { border-color: var(--err); }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { background: #fafbfc; color: var(--muted); font-weight: 500; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  .scroll { overflow-x: auto; }
+  input[type=number], input[type=text], select {
+    font: inherit; font-size: 13px; padding: 4px 8px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--card);
+  }
+  input[type=number] { width: 90px; }
+  form.inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  textarea {
+    width: 100%; min-height: 380px; font: 12px/1.5 Consolas, monospace;
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px; resize: vertical;
+  }
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: #111827; color: #fff; padding: 8px 18px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 10;
+  }
+  #toast.show { opacity: .95; }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>爬虫管理</h1>
+  <span id="mongoBadge" class="badge">MongoDB</span>
+  <button onclick="setToken()">Token</button>
+  <button class="danger" onclick="restartProcess()">重启服务</button>
+</header>
+<main>
+  <section>
+    <h2>来源状态</h2>
+    <div id="sources" class="cards"></div>
+    <p class="hint" id="jobsHint"></p>
+  </section>
+
+  <section>
+    <h2>分页补抓</h2>
+    <form class="inline" onsubmit="return startBackfill(event)">
+      <select id="bfSource">
+        <option value="x1080x">x1080x</option>
+        <option value="sehuatang">sehuatang</option>
+      </select>
+      <label>起始页 <input type="number" id="bfStart" value="1" min="1"></label>
+      <label>结束页 <input type="number" id="bfEnd" min="1" required></label>
+      <label>分区 <input type="text" id="bfPartition" placeholder="typeid/fid，逗号分隔，可空"></label>
+      <label><input type="checkbox" id="bfResume"> 从检查点续跑</label>
+      <label><input type="checkbox" id="bfDry"> dry-run</label>
+      <button class="primary" type="submit">开始补抓</button>
+    </form>
+    <div class="scroll" style="margin-top:10px">
+      <table id="bfProgress"><thead><tr><th>检查点</th><th>已完成页</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>失败台账 <span class="hint" id="dueHint"></span></h2>
+    <div class="scroll">
+      <table id="failures">
+        <thead><tr><th>来源</th><th>key</th><th>阶段</th><th>错误</th><th>次数</th><th>下次重试</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>运行历史</h2>
+    <div class="scroll">
+      <table id="runs">
+        <thead><tr><th>时间</th><th>来源</th><th>状态</th><th>发现</th><th>请求</th><th>保存</th><th>失败</th><th>耗时</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>配置文件 <span class="hint" id="configPath"></span></h2>
+    <textarea id="configText" spellcheck="false"></textarea>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center">
+      <button class="primary" onclick="saveConfig()">保存配置</button>
+      <button onclick="loadConfig()">重新加载</button>
+      <span class="hint">保存后需点击「重启服务」生效</span>
+    </div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function token() { return localStorage.getItem("sht_token") || ""; }
+function setToken() {
+  const value = prompt("访问 token（留空清除）", token());
+  if (value !== null) {
+    localStorage.setItem("sht_token", value.trim());
+    refreshAll();
+  }
+}
+
+function toast(message, isError) {
+  const el = $("toast");
+  el.textContent = message;
+  el.style.background = isError ? "var(--err)" : "#111827";
+  el.classList.add("show");
+  setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+async function api(path, options = {}) {
+  options.headers = Object.assign(
+    { "X-Token": token(), "Content-Type": "application/json" },
+    options.headers || {}
+  );
+  const response = await fetch(path, options);
+  if (response.status === 401) {
+    toast("需要有效 token，请点右上角 Token 设置", true);
+    throw new Error("unauthorized");
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    toast(data.detail || `请求失败 ${response.status}`, true);
+    throw new Error(data.detail || response.status);
+  }
+  return data;
+}
+
+function fmtTime(value) {
+  if (!value) return "-";
+  const raw = String(value).replace("T", " ");
+  return raw.slice(0, 19);
+}
+
+async function refreshStatus() {
+  const data = await api("/api/status");
+  $("mongoBadge").className = "badge " + (data.mongodb_enabled ? "on" : "err");
+  $("mongoBadge").textContent = data.mongodb_enabled ? "MongoDB 已连接配置" : "MongoDB 未启用";
+
+  const container = $("sources");
+  container.innerHTML = "";
+  for (const source of data.sources) {
+    const last = source.last_run;
+    const lastText = last
+      ? `${fmtTime(last.created_at)} · ${last.status} · 保存 ${last.saved ?? 0} 失败 ${last.failed ?? 0}`
+      : "暂无记录";
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="row">
+        <h3>${source.name}</h3>
+        <span class="badge ${source.enabled ? "on" : ""}">${source.enabled ? "已启用" : "未启用"}</span>
+        ${source.running ? '<span class="badge run">运行中</span>' : ""}
+      </div>
+      <div class="meta">最近运行：${lastText}</div>
+      <div class="row">
+        <button onclick="triggerCrawl('${source.name}', false)">立即抓取</button>
+        <button onclick="triggerCrawl('${source.name}', true)">dry-run</button>
+        <button onclick="triggerRetry('${source.name}')">重试失败</button>
+      </div>`;
+    container.appendChild(card);
+  }
+
+  const jobs = data.scheduler_jobs || [];
+  $("jobsHint").textContent = jobs.length
+    ? "调度任务：" + jobs.map((job) => `${job.name} → ${fmtTime(job.next_run_time)}`).join("；")
+    : "当前进程没有运行调度器任务";
+}
+
+async function refreshRuns() {
+  const data = await api("/api/runs?limit=30");
+  $("runs").querySelector("tbody").innerHTML = (data.runs || [])
+    .map((run) => `<tr>
+      <td>${fmtTime(run.created_at)}</td><td>${run.source}</td><td>${run.status}</td>
+      <td>${run.discovered ?? "-"}</td><td>${run.requested ?? "-"}</td>
+      <td>${run.saved ?? "-"}</td><td>${run.failed ?? "-"}</td>
+      <td>${run.elapsed_ms ? (run.elapsed_ms / 1000).toFixed(1) + "s" : "-"}</td>
+    </tr>`).join("") || '<tr><td colspan="8">暂无记录</td></tr>';
+}
+
+async function refreshFailures() {
+  const data = await api("/api/failures?limit=100");
+  const due = Object.entries(data.due_counts || {})
+    .map(([source, count]) => `${source} 到期 ${count}`).join("，");
+  $("dueHint").textContent = due ? `（${due}）` : "";
+  $("failures").querySelector("tbody").innerHTML = (data.failures || [])
+    .map((row) => `<tr>
+      <td>${row.source}</td><td>${row.source_key}</td><td>${row.stage}</td>
+      <td>${row.error_type || ""}</td><td>${row.failure_count ?? row.attempts ?? ""}</td>
+      <td>${fmtTime(row.next_retry_at)}</td>
+    </tr>`).join("") || '<tr><td colspan="6">没有失败记录</td></tr>';
+}
+
+async function refreshBackfill() {
+  const data = await api("/api/backfill-progress");
+  const entries = Object.entries(data.progress || {});
+  $("bfProgress").querySelector("tbody").innerHTML = entries
+    .map(([key, page]) => `<tr><td>${key}</td><td>${page}</td></tr>`).join("")
+    || '<tr><td colspan="2">暂无补抓进度</td></tr>';
+}
+
+async function triggerCrawl(source, dryRun) {
+  await api("/api/actions/crawl", {
+    method: "POST",
+    body: JSON.stringify({ source, dry_run: dryRun }),
+  });
+  toast(`${source} ${dryRun ? "dry-run" : "抓取"}已开始`);
+  setTimeout(refreshStatus, 800);
+}
+
+async function triggerRetry(source) {
+  await api("/api/actions/retry-failed", {
+    method: "POST",
+    body: JSON.stringify({ source }),
+  });
+  toast(`${source} 失败重试已开始`);
+}
+
+async function startBackfill(event) {
+  event.preventDefault();
+  const source = $("bfSource").value;
+  const partitions = $("bfPartition").value.split(/[\s,，]+/).filter(Boolean);
+  const payload = {
+    source,
+    start_page: Number($("bfStart").value || 1),
+    end_page: Number($("bfEnd").value),
+    resume: $("bfResume").checked,
+    dry_run: $("bfDry").checked,
+  };
+  if (partitions.length) {
+    payload[source === "x1080x" ? "typeids" : "fids"] = partitions;
+  }
+  await api("/api/actions/backfill-pages", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  toast(`${source} 补抓已开始`);
+  return false;
+}
+
+async function loadConfig() {
+  const data = await api("/api/config");
+  $("configText").value = data.content;
+  $("configPath").textContent = data.path;
+}
+
+async function saveConfig() {
+  if (!confirm("确认保存配置？原文件将备份为 config.yaml.bak")) return;
+  await api("/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ content: $("configText").value }),
+  });
+  toast("配置已保存，重启后生效");
+}
+
+async function restartProcess() {
+  if (!confirm("确认重启服务进程？")) return;
+  await api("/api/actions/restart", { method: "POST" });
+  toast("正在重启，页面将在 5 秒后刷新…");
+  setTimeout(() => location.reload(), 5000);
+}
+
+async function refreshAll() {
+  try {
+    await refreshStatus();
+    await Promise.all([refreshRuns(), refreshFailures(), refreshBackfill()]);
+  } catch (error) { /* toast 已提示 */ }
+}
+
+loadConfig().catch(() => {});
+refreshAll();
+setInterval(() => { refreshStatus().catch(() => {}); }, 5000);
+setInterval(() => {
+  refreshRuns().catch(() => {});
+  refreshFailures().catch(() => {});
+  refreshBackfill().catch(() => {});
+}, 15000);
+</script>
+</body>
+</html>
