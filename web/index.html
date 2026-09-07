@@ -177,8 +177,13 @@ async function api(path, options = {}) {
 
 function fmtTime(value) {
   if (!value) return "-";
-  const raw = String(value).replace("T", " ");
-  return raw.slice(0, 19);
+  const raw = String(value);
+  const parsed = new Date(raw.includes("T") ? raw : raw.replace(" ", "T"));
+  // 无法解析（或后端给的字符串不带时区）时退回原样截断显示
+  if (Number.isNaN(parsed.getTime())) return raw.replace("T", " ").slice(0, 19);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ` +
+    `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
 }
 
 async function refreshStatus() {

@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -77,6 +78,19 @@ def _spawn(tracker: ActionTracker, key: str, description: str, target) -> bool:
     tracker.attach(key, thread)
     thread.start()
     return True
+
+
+def _iso_utc(value):
+    """把 Mongo 返回的 naive UTC datetime 序列化成带时区的 ISO 字符串。
+
+    pymongo 默认返回不带 tzinfo 的 UTC 时间，直接 str() 会让前端
+    无从判断时区；统一补上 UTC 标记，由浏览器转成本地时间显示。
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+    return str(value)
 
 
 def _restart_process() -> None:
@@ -168,7 +182,7 @@ def create_app(
                     rows = find_recent_crawl_runs(source=name, limit=1)
                     if rows:
                         row = rows[0]
-                        row["created_at"] = str(row.get("created_at", ""))
+                        row["created_at"] = _iso_utc(row.get("created_at", ""))
                         last_runs[name] = row
             except Exception as exc:
                 log.warning(f"读取运行历史失败: {exc}")
@@ -198,7 +212,7 @@ def create_app(
 
         rows = find_recent_crawl_runs(source=source, limit=limit)
         for row in rows:
-            row["created_at"] = str(row.get("created_at", ""))
+            row["created_at"] = _iso_utc(row.get("created_at", ""))
         return {"runs": rows}
 
     @app.get("/api/failures", dependencies=[Depends(require_auth)])
@@ -211,7 +225,7 @@ def create_app(
         for row in rows:
             for key in ("last_failed_at", "next_retry_at", "created_at", "resolved_at"):
                 if row.get(key) is not None:
-                    row[key] = str(row[key])
+                    row[key] = _iso_utc(row[key])
         return {"failures": rows, "due_counts": due_counts}
 
     @app.get("/api/backfill-progress", dependencies=[Depends(require_auth)])
