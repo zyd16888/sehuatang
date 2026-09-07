@@ -73,6 +73,7 @@ crawler:
           # 生产环境建议留空，并使用 CRAWLER_SEHUATANG_PROXY_URL
           url: "http://127.0.0.1:7890"
       challenge:
+        # docker 部署配合 byparr 服务时填 http://byparr:8191/v1
         flaresolverr_url: ""
       schedule:
         cron: "0 2 * * *"
@@ -101,8 +102,9 @@ crawler:
           enabled: false
           url: ""
       challenge:
-        # 站点有 Cloudflare JS 挑战，必须配置 FlareSolverr（或环境变量
-        # CRAWLER_X1080X_FLARESOLVERR_URL）
+        # 站点有 Cloudflare JS 挑战，必须配置 FlareSolverr 兼容服务
+        # （docker 部署填 http://byparr:8191/v1，
+        #   或用环境变量 CRAWLER_X1080X_FLARESOLVERR_URL）
         flaresolverr_url: ""
       schedule:
         cron: "0 3 * * *"

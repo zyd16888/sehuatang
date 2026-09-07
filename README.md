@@ -211,12 +211,11 @@ docker compose down
 容器默认运行 `python run.py --mode web`（调度器 + 管理页，端口 8181，请配置
 `SHT_WEB_TOKEN`）。配置目录挂载到 `/app/config`（管理页需要写入），日志和
 运行状态分别挂载到 `/app/logs`、`/app/data`。管理页的重启按钮通过退出进程
-配合 `restart: unless-stopped` 实现容器级重启。需要 FlareSolverr 时：
+配合 `restart: unless-stopped` 实现容器级重启。
 
-```powershell
-$env:CRAWLER_SEHUATANG_FLARESOLVERR_URL = "http://flaresolverr:8191/v1"
-docker compose --profile flaresolverr up -d
-```
+CF 过盾使用 compose 内置的 `byparr` 服务（FlareSolverr 兼容 API），在
+config 的 `crawler.sources.<source>.challenge.flaresolverr_url` 填
+`http://byparr:8191/v1`；x1080x 必须配置，sehuatang 在触发 CF 时使用。
 
 脚本用途见 [scripts/README.md](scripts/README.md)。
 

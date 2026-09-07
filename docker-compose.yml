@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   sehuatang-crawler:
-    image: cxsz16888/sehuatang:latest
+    image: cxsz16888/sehuatang:v2
     container_name: sehuatang-crawler
     restart: unless-stopped
 
@@ -12,8 +12,8 @@ services:
       - TZ=Asia/Shanghai
       - DOCKER_CONTAINER=true
       - PYTHONPATH=/app
-      # 启用 CF 过盾时取消下行注释（同时配置 flaresolverr profile）
-      # - CRAWLER_SEHUATANG_FLARESOLVERR_URL=http://flaresolverr:8191/v1
+      # Web 管理页访问令牌（监听非本机地址时必须设置，也可写在 config 的 web.token）
+      # - SHT_WEB_TOKEN=change-me
 
     # 挂载卷
     volumes:
@@ -21,7 +21,7 @@ services:
       - ./logs:/app/logs         # 日志文件
       - crawler_data:/app/data   # 数据目录
 
-    # Web 管理页端口（--mode web 时使用；务必配置 web.token 或 SHT_WEB_TOKEN）
+    # Web 管理页端口（务必配置 web.token 或 SHT_WEB_TOKEN）
     ports:
       - "8181:8181"
 
@@ -49,14 +49,14 @@ services:
     # 默认命令：调度器 + Web 管理页
     command: ["python", "run.py", "--mode", "web"]
 
-  # CF 过盾服务（仅在遇到 Cloudflare 挑战时需要，用 --profile flaresolverr 启动）
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: flaresolverr
+  # CF 过盾服务（FlareSolverr 兼容 API；x1080x 必需，sehuatang 触发 CF 时也会用）
+  # 在 config 的 crawler.sources.<source>.challenge.flaresolverr_url
+  # 填 http://byparr:8191/v1
+  byparr:
+    image: ghcr.io/thephaseless/byparr:latest
+    container_name: byparr
     restart: unless-stopped
-    profiles: ["flaresolverr"]
     environment:
-      - LOG_LEVEL=info
       - TZ=Asia/Shanghai
     ports:
       - "8191:8191"
