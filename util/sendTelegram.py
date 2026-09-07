@@ -223,8 +223,49 @@ def _send_media_batches(image_list, content):
     return sent_any
 
 
+def _fetch_hotlinked_image(url, timeout=20):
+    """下载有防盗链的图片，返回字节；失败返回 None。
+
+    x1080x 的封面图床（hxmmdd.com 等）校验 Referer：无 Referer 直接 404，
+    带图床自身域名即放行（实测有效，且不依赖频繁轮换的论坛镜像域名）。
+    Telegram 服务器拉 URL 时不带 Referer，所以必须由我们下载后按文件上传。
+    """
+    from urllib.parse import urlsplit
+
+    from curl_cffi import requests as curl_requests
+
+    parts = urlsplit(str(url or ""))
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    try:
+        response = curl_requests.get(
+            url,
+            headers={"Referer": f"{parts.scheme}://{parts.netloc}/"},
+            impersonate="chrome110",
+            timeout=timeout,
+        )
+        content_type = str(response.headers.get("content-type") or "")
+        if (
+            response.status_code == 200
+            and response.content
+            and content_type.startswith("image/")
+        ):
+            return response.content
+        log.warning(
+            f"图片下载失败: status={response.status_code} "
+            f"type={content_type} url={url}"
+        )
+    except Exception as e:
+        log.warning(f"图片下载异常: url={url} error={e}")
+    return None
+
+
 def send_x1080x_media_group(data_list):
-    """推送 x1080x 增量新资源，格式与 sehuatang 推送保持一致。"""
+    """推送 x1080x 增量新资源，格式与 sehuatang 推送保持一致。
+
+    图片先带 Referer 下载成字节再按文件上传（图床有防盗链，
+    Telegram 服务器直接拉 URL 会 404）；下载失败的图跳过。
+    """
     for data in data_list:
         code = data.get("code") or ""
         title = data.get("title") or ""
@@ -240,7 +281,13 @@ def send_x1080x_media_group(data_list):
             f"发布日期：{date}\n\n{tags}"
         )
         content = special_char_sub(content)
-        _send_media_batches(image_list, content)
+
+        prepared_images = []
+        for image_url in image_list:
+            payload = _fetch_hotlinked_image(image_url)
+            if payload is not None:
+                prepared_images.append(payload)
+        _send_media_batches(prepared_images, content)
 
 
 MAX_MESSAGE_LENGTH = 4000  # 预留一些字符，防止超限
