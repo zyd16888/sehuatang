@@ -4,7 +4,7 @@ PyYAML>=6.0
 pymongo[srv]>=4.6.0
 
 # 爬虫相关（curl_cffi 模拟 Chrome 指纹，无需真实浏览器）
-curl_cffi>=0.7.0
+curl_cffi>=0.15.0
 
 # 调度器
 apscheduler
