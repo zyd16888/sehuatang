@@ -325,6 +325,60 @@ class CrawlEngineTests(unittest.TestCase):
         self.assertEqual([], failure_store.cleared)
         self.assertEqual([], failure_store.failures)
 
+    def test_run_saves_in_batches(self):
+        # 分批入库：中途被杀时已完成批次不丢，save_many 按批多次调用
+        class ManyTargetsSource(self.FakeSource):
+            def discover(self, context, http):
+                return DiscoveryResult(
+                    targets=[
+                        CrawlTarget(f"t{i}", f"https://example.test/{i}")
+                        for i in range(5)
+                    ],
+                    details={"pages": 1},
+                )
+
+        class OkHttp:
+            def __init__(self):
+                self.batch_sizes = []
+
+            def fetch_many(self, urls, stage="detail"):
+                self.batch_sizes.append(len(urls))
+                return [
+                    FetchResult(
+                        url=url,
+                        body=b"ok",
+                        status_code=200,
+                        attempts=1,
+                        elapsed_ms=1,
+                    )
+                    for url in urls
+                ]
+
+        class BatchRepository(self.FakeRepository):
+            def __init__(self):
+                super().__init__()
+                self.save_calls = 0
+
+            def save_many(self, records):
+                self.save_calls += 1
+                self.saved_records.extend(records)
+                return SaveResult(processed=len(records), saved=len(records))
+
+        repository = BatchRepository()
+        http = OkHttp()
+        summary = CrawlEngine(http, self.FakeFailureStore()).run(
+            ManyTargetsSource(),
+            repository,
+            run_id="run-batch",
+            batch_size=2,
+        )
+
+        self.assertEqual([2, 2, 1], http.batch_sizes)
+        self.assertEqual(3, repository.save_calls)
+        self.assertEqual(5, len(repository.saved_records))
+        self.assertEqual(5, summary.saved)
+        self.assertEqual(5, summary.succeeded)
+
     def test_retry_failed_uses_failure_store_instead_of_discovery(self):
         class RetryHttp:
             def fetch_many(self, urls, stage="detail"):

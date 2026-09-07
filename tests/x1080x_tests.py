@@ -204,6 +204,18 @@ class X1080XSourceTests(unittest.TestCase):
         for typeid in TYPE_MAP:
             self.assertEqual(2, calls.count(source.list_url(typeid, 1)))
 
+    def test_discover_aborts_on_rate_limit_page(self):
+        # 过盾成功但站点返回"请求过于频繁"限流页，应立即中止整轮
+        source = self._source()
+        rl_body = "<html><title>訪問受限 - 請求過於頻繁</title></html>".encode("utf-8")
+        pages = {source.list_url(typeid, 1): rl_body for typeid in TYPE_MAP}
+        with self.assertRaises(RuntimeError) as ctx:
+            source.discover(
+                CrawlContext(source="x1080x", run_id="test"),
+                self._http(pages),
+            )
+        self.assertIn("限流", str(ctx.exception))
+
     def test_discover_raises_when_all_lists_fail(self):
         source = self._source()
         with self.assertRaises(RuntimeError):

@@ -2,6 +2,7 @@
 import os
 from typing import Dict, Optional
 
+from scrapers.core.cf_challenge import is_rate_limited
 from scrapers.core.config import load_source_settings
 from scrapers.core.contracts import CrawlTarget
 from scrapers.core.engine import CrawlEngine
@@ -163,6 +164,7 @@ class X1080XScraper:
                 "stopped": "",
             }
             summary["partitions"][typeid] = partition_summary
+            rate_limited = False
 
             for page in range(first_page, end_page + 1):
                 result = self.http.fetch(source.list_url(typeid, page), stage="list")
@@ -173,6 +175,15 @@ class X1080XScraper:
                         "x1080x 补抓列表页失败，该分类暂停（检查点未推进，可 --resume 继续）: "
                         f"typeid={typeid} page={page} error_type={result.error_type}"
                     )
+                    break
+
+                if is_rate_limited(result.body):
+                    partition_summary["stopped"] = f"rate_limited@{page}"
+                    log.error(
+                        "x1080x 补抓命中站点限流（请求过于频繁），中止全部剩余分类"
+                        f"（检查点未推进，可稍后 --resume 继续）: typeid={typeid} page={page}"
+                    )
+                    rate_limited = True
                     break
 
                 tids = source.parser.parse_list(result.body)
@@ -226,9 +237,15 @@ class X1080XScraper:
                 partition_summary["pages"] += 1
                 partition_summary["saved"] += page_run.saved
                 partition_summary["failed"] += page_run.failed
+                # 补抓不推送通知，及时清掉累计载荷，长区间补抓不占内存
+                repository.last_saved_payloads.clear()
 
                 if not dry_run:
                     checkpoints.save("x1080x", typeid, page)
+
+            if rate_limited:
+                # 限流是全站级别，其余分类没有必要继续尝试
+                break
 
         log.info(
             "x1080x 分页补抓结束: "

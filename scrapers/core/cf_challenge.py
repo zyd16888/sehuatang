@@ -19,6 +19,14 @@ _GLOBAL_SOLVE_LOCK = threading.Lock()
 CF_STATUS = (403, 429, 503)
 _CF_TITLE_KEYWORDS = ("just a moment", "attention required")
 _CF_BODY_MARKERS = (b"cf-challenge", b"__cf_chl", b"challenges.cloudflare.com")
+# 站点自身的限流页（非 CF 挑战）：过盾成功但返回"请求过于频繁"。
+# 简繁两种写法都覆盖，命中后应立即退避，继续请求只会加剧限流。
+_RATE_LIMIT_MARKERS = (
+    "請求過於頻繁",
+    "请求过于频繁",
+    "訪問受限",
+    "访问受限",
+)
 _TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
 _CHARSET_META_RE = re.compile(
     r'charset=["\']?(gbk|gb2312|big5)["\']?',
@@ -39,6 +47,14 @@ def is_cf_challenge(body: Optional[bytes], status: Optional[int]) -> bool:
         return False
     title = match.group(1).decode("utf-8", errors="ignore").strip().lower()
     return any(keyword in title for keyword in _CF_TITLE_KEYWORDS)
+
+
+def is_rate_limited(body: Optional[bytes]) -> bool:
+    """识别站点限流页（"请求过于频繁"/"访问受限"），与 CF 挑战区分。"""
+    if not body:
+        return False
+    text = body[:5000].decode("utf-8", errors="ignore")
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
 
 
 class FlareSolverrClient:

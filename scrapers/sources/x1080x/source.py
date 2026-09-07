@@ -9,6 +9,7 @@ from scrapers.core.contracts import (
     CrawlTarget,
     DiscoveryResult,
 )
+from scrapers.core.cf_challenge import is_rate_limited
 from scrapers.core.http import CrawlerHttpClient
 from scrapers.core.models import FetchResult
 from util.log_util import log
@@ -105,6 +106,14 @@ class X1080XSource:
                         f"error_type={result.error_type}"
                     )
                     break
+
+                if is_rate_limited(result.body):
+                    # 站点限流：立即中止整轮，继续请求只会加剧限流；
+                    # 下一个调度周期自然重试。
+                    raise RuntimeError(
+                        f"x1080x 命中站点限流（请求过于频繁），中止本轮: "
+                        f"typeid={typeid} page={page}"
+                    )
 
                 pages_fetched += 1
                 tids = self.parser.parse_list(result.body)

@@ -36,6 +36,7 @@ class CrawlEngine:
         dry_run: bool = False,
         retry_failed: bool = False,
         run_id: Optional[str] = None,
+        batch_size: int = 20,
     ) -> RunSummary:
         context = CrawlContext(
             source=source.name,
@@ -64,6 +65,34 @@ class CrawlEngine:
             else repository.select_targets(discovery.targets)
         )
         summary.requested = len(targets)
+
+        # 分批抓取并入库：一批抓完立即保存，运行中途被杀
+        # （重启/断电）时已完成批次不丢失。
+        batch_size = max(1, int(batch_size))
+        for start in range(0, len(targets), batch_size):
+            batch = targets[start:start + batch_size]
+            self._process_batch(context, source, repository, batch, summary)
+
+        summary.elapsed_ms = int((time.monotonic() - started) * 1000)
+        log.info(
+            "来源抓取结束: "
+            f"run_id={context.run_id} source={source.name} status={summary.status.value} "
+            f"discovered={summary.discovered} requested={summary.requested} "
+            f"succeeded={summary.succeeded} failed={summary.failed} "
+            f"saved={summary.saved} updated={summary.updated} "
+            f"retries={summary.retries} elapsed_ms={summary.elapsed_ms}"
+        )
+        return summary
+
+    def _process_batch(
+        self,
+        context: CrawlContext,
+        source: SourceAdapter,
+        repository: RecordRepository,
+        targets,
+        summary: RunSummary,
+    ) -> None:
+        """抓取、解析并保存一批目标，累加进汇总。"""
         fetch_results = self.http.fetch_many(
             [target.url for target in targets],
             stage="detail",
@@ -135,15 +164,15 @@ class CrawlEngine:
                 continue
             records.append(record)
 
-        summary.succeeded = len(records)
+        summary.succeeded += len(records)
         summary.failed += len(failures)
 
-        if records and not dry_run:
+        if records and not context.dry_run:
             saved = repository.save_many(records)
-            summary.saved = saved.saved
-            summary.updated = saved.updated
+            summary.saved += saved.saved
+            summary.updated += saved.updated
 
-        if failures and not dry_run:
+        if failures and not context.dry_run:
             try:
                 self.failure_store.record(failures)
             except Exception as exc:
@@ -151,7 +180,7 @@ class CrawlEngine:
                     "失败台账写入失败: "
                     f"run_id={context.run_id} source={source.name} error={exc}"
                 )
-        if records and not dry_run:
+        if records and not context.dry_run:
             try:
                 self.failure_store.clear(
                     source.name,
@@ -162,14 +191,3 @@ class CrawlEngine:
                     "失败台账清理失败: "
                     f"run_id={context.run_id} source={source.name} error={exc}"
                 )
-
-        summary.elapsed_ms = int((time.monotonic() - started) * 1000)
-        log.info(
-            "来源抓取结束: "
-            f"run_id={context.run_id} source={source.name} status={summary.status.value} "
-            f"discovered={summary.discovered} requested={summary.requested} "
-            f"succeeded={summary.succeeded} failed={summary.failed} "
-            f"saved={summary.saved} updated={summary.updated} "
-            f"retries={summary.retries} elapsed_ms={summary.elapsed_ms}"
-        )
-        return summary
