@@ -94,6 +94,9 @@ crawler:
         cron: "30 2 * * *"
     x1080x:
       enabled: false
+      # 增量抓到新数据时发送 Telegram 推送（沿用 sendMessage 配置；
+      # dry-run / retry-failed / 补抓不推送）
+      notify_telegram: true
       # CF 过盾后请求走直连，低并发降低重新触发挑战概率
       concurrency: 2
       http:

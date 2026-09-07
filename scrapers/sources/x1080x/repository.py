@@ -15,6 +15,8 @@ class X1080XRepository:
         self._save_func = save_func
         self.refresh_all = bool(refresh_all)
         self.existing_count = 0
+        # 最近一次 save_many 的载荷；new_only 模式下即本次新增数据（供通知用）
+        self.last_saved_payloads = []
 
     def select_targets(self, targets: Sequence[CrawlTarget]) -> List[CrawlTarget]:
         keys = [target.key for target in targets]
@@ -25,7 +27,9 @@ class X1080XRepository:
         return [target for target in targets if target.key not in existing]
 
     def save_many(self, records: Sequence[CrawlRecord]) -> SaveResult:
-        result = self._save_func([dict(record.payload) for record in records])
+        payloads = [dict(record.payload) for record in records]
+        result = self._save_func(payloads)
+        self.last_saved_payloads = payloads
         return SaveResult(
             processed=int(result.get("processed", len(records))),
             saved=int(result.get("upserted", 0)),

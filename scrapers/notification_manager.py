@@ -5,7 +5,7 @@
 from typing import List, Dict, Any
 from util.log_util import log
 from util.config import tg_enable
-from util.sendTelegram import send_media_group, rec_message
+from util.sendTelegram import send_media_group, send_x1080x_media_group, rec_message
 
 
 class NotificationManager:
@@ -40,6 +40,18 @@ class NotificationManager:
         except Exception as e:
             self.log.error(f"发送通知时出错: {e}")
             return f"通知发送失败: {str(e)}"
+
+    def send_x1080x_notifications(self, data_list: List[Dict[str, Any]]) -> bool:
+        """推送 x1080x 增量新资源；未启用 TG 或列表为空时静默跳过。"""
+        if not data_list or not self.tg_enable:
+            return False
+        try:
+            self.log.info(f"发送 x1080x Telegram 通知，共 {len(data_list)} 条")
+            send_x1080x_media_group(data_list)
+            return True
+        except Exception as e:
+            self.log.error(f"发送 x1080x 通知时出错: {e}")
+            return False
 
     def is_notification_enabled(self) -> bool:
         """检查是否启用了通知功能"""

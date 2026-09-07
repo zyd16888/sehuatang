@@ -167,6 +167,82 @@ def send_media_group(data_list, fid):
     #     log.debug("rec_message returned an empty message, skipping send_message")
 
 
+def _send_media_batches(image_list, content):
+    """按每批 10 张发送图片组，caption 挂在最后一张；无图时发纯文本。
+
+    返回是否至少成功发送了一条消息。
+    """
+    if not image_list:
+        try:
+            antiflood(
+                bot.send_message,
+                chat_id=tg_chat_id,
+                text=content,
+                parse_mode="markdownV2",
+            )
+            return True
+        except Exception as e:
+            log.error(f"Failed to send text message: {e}")
+            return False
+
+    batch_size = 10
+    num_batches = math.ceil(len(image_list) / batch_size)
+    sent_any = False
+    for batch_index in range(num_batches):
+        media_group = []
+        batch_images = image_list[
+            batch_index * batch_size : (batch_index + 1) * batch_size
+        ]
+        for index, image in enumerate(batch_images):
+            if batch_index == num_batches - 1 and index == len(batch_images) - 1:
+                media_group.append(
+                    InputMediaPhoto(
+                        media=image, caption=content, parse_mode="markdownV2"
+                    )
+                )
+            else:
+                media_group.append(InputMediaPhoto(media=image))
+        try:
+            antiflood(bot.send_media_group, chat_id=tg_chat_id, media=media_group)
+            sent_any = True
+        except Exception as e:
+            log.error(f"Failed to send media group: {e}")
+
+    if not sent_any:
+        # 图片全部失败时退回纯文本，保证通知不丢
+        try:
+            antiflood(
+                bot.send_message,
+                chat_id=tg_chat_id,
+                text=content,
+                parse_mode="markdownV2",
+            )
+            sent_any = True
+        except Exception as e:
+            log.error(f"Failed to send fallback text message: {e}")
+    return sent_any
+
+
+def send_x1080x_media_group(data_list):
+    """推送 x1080x 增量新资源，格式与 sehuatang 推送保持一致。"""
+    for data in data_list:
+        code = data.get("code") or ""
+        title = data.get("title") or ""
+        magnet = data.get("magnet") or ""
+        date = data.get("date") or ""
+        section = str(data.get("section") or "").strip()
+        image_list = list(data.get("img") or [])
+
+        header = f"{code} {title}".strip()
+        tags = "#x1080x" + (f" #{section}" if section else "")
+        content = (
+            f"\n{header}\n\n磁力链接：\n`{magnet}`\n\n"
+            f"发布日期：{date}\n\n{tags}"
+        )
+        content = special_char_sub(content)
+        _send_media_batches(image_list, content)
+
+
 MAX_MESSAGE_LENGTH = 4000  # 预留一些字符，防止超限
 
 def rec_message(data_list, fid):

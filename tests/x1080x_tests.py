@@ -314,6 +314,100 @@ class CfChallengeDetectionTests(unittest.TestCase):
         self.assertFalse(is_cf_challenge(None, 200))
 
 
+class X1080XNotificationTests(unittest.TestCase):
+    def _scraper(self, notified):
+        from scrapers.core.contracts import NullFailureStore
+        from scrapers.x1080x_scraper import X1080XScraper
+
+        class FakeHttp:
+            def __init__(self, pages):
+                self.pages = pages
+
+            def fetch(self, url, stage="detail"):
+                body = self.pages.get(url)
+                return FetchResult(
+                    url=url,
+                    body=body,
+                    status_code=200 if body else 500,
+                    attempts=1,
+                    elapsed_ms=0,
+                    error_type=None if body else "http_status",
+                )
+
+            def fetch_many(self, urls, stage="detail"):
+                return [self.fetch(url, stage) for url in urls]
+
+        scraper = X1080XScraper.__new__(X1080XScraper)
+        scraper.config = {
+            "base_url": "https://agaghhh.cc",
+            "fid": 244,
+            "typeids": {"5479": "中文字幕"},
+            "page_limit": 1,
+        }
+        base = "https://agaghhh.cc/forum.php"
+        scraper.http = FakeHttp({
+            f"{base}?mod=forumdisplay&fid=244&archiver=1&page=1&filter=typeid&typeid=5479": LIST_HTML,
+            f"{base}?mod=viewthread&tid=1001&archiver=1": DETAIL_HTML,
+            f"{base}?mod=viewthread&tid=1002&archiver=1": DETAIL_HTML,
+        })
+        scraper.failure_store = NullFailureStore()
+
+        import scrapers.x1080x_scraper as module
+        self._orig_lookup = module.find_existing_x1080x_keys
+        self._orig_save = module.save_x1080x_items
+        module.find_existing_x1080x_keys = lambda keys: set()
+        module.save_x1080x_items = lambda items: {
+            "processed": len(items), "upserted": len(items), "modified": 0,
+        }
+        self.addCleanup(self._restore, module)
+
+        class FakeNotifier:
+            def send_x1080x_notifications(self, data_list):
+                notified.extend(data_list)
+                return True
+
+        import scrapers.notification_manager as notification_module
+        self._orig_manager = notification_module.NotificationManager
+        notification_module.NotificationManager = FakeNotifier
+        self.addCleanup(
+            setattr, notification_module, "NotificationManager", self._orig_manager
+        )
+        return scraper
+
+    def _restore(self, module):
+        module.find_existing_x1080x_keys = self._orig_lookup
+        module.save_x1080x_items = self._orig_save
+
+    def test_incremental_crawl_notifies_saved_items(self):
+        notified = []
+        scraper = self._scraper(notified)
+
+        scraper.crawl()
+
+        self.assertEqual(2, len(notified))
+        self.assertEqual("1001", notified[0]["source_key"])
+        self.assertTrue(notified[0]["magnet"].startswith("magnet:?"))
+
+    def test_dry_run_and_retry_failed_do_not_notify(self):
+        notified = []
+        scraper = self._scraper(notified)
+
+        scraper.crawl(dry_run=True)
+        self.assertEqual([], notified)
+
+        scraper.crawl(retry_failed=True)
+        self.assertEqual([], notified)
+
+    def test_notify_can_be_disabled_by_config(self):
+        notified = []
+        scraper = self._scraper(notified)
+        scraper.config["notify_telegram"] = False
+
+        scraper.crawl()
+
+        self.assertEqual([], notified)
+
+
 class X1080XHttpClientTests(unittest.TestCase):
     def test_cf_challenge_triggers_bypass_and_reuses_cookies(self):
         from scrapers.core.config import HttpSettings

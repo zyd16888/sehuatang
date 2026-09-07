@@ -63,6 +63,7 @@ class X1080XScraper:
             retry_failed=retry_failed,
         )
         summary.details["existing"] = repository.existing_count
+        self._notify_new_items(repository, dry_run=dry_run, retry_failed=retry_failed)
         result = summary.as_dict()
         log.info(
             "x1080x 抓取汇总: "
@@ -72,6 +73,33 @@ class X1080XScraper:
             f"saved={result['saved']} updated={result['updated']}"
         )
         return result
+
+    def _notify_new_items(
+        self,
+        repository: X1080XRepository,
+        *,
+        dry_run: bool,
+        retry_failed: bool,
+    ) -> None:
+        """仅在定时/手动的增量抓取后推送新数据。
+
+        dry-run 不落库、retry-failed 是失败恢复、refresh_all 会重发旧数据，
+        这三种场景都不通知；backfill_pages 也不经过本方法。
+        """
+        if dry_run or retry_failed or repository.refresh_all:
+            return
+        if not repository.last_saved_payloads:
+            return
+        if not bool(self.config.get("notify_telegram", True)):
+            return
+        try:
+            from scrapers.notification_manager import NotificationManager
+
+            NotificationManager().send_x1080x_notifications(
+                repository.last_saved_payloads
+            )
+        except Exception as exc:
+            log.error(f"x1080x 通知发送失败（不影响抓取结果）: {exc}")
 
     def backfill_pages(
         self,
