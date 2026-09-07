@@ -51,6 +51,11 @@ x1080x:
 
 # 多来源爬虫公共配置。来源配置覆盖 defaults。
 crawler:
+  # 失败台账自动重试：定期检查各来源到期（next_retry_at 已过）的失败记录，
+  # 有则自动触发 retry_failed；没有则静默跳过。默认开启、每 60 分钟一次。
+  retry_failed:
+    enabled: true
+    interval_minutes: 60
   defaults:
     concurrency: 4
     http:

@@ -225,15 +225,64 @@ def create_async_job_wrapper(async_func: Callable, job_name: str = ""):
     return wrapper
 
 
+def _add_retry_failed_job(manager: SchedulerManager, full_config: dict) -> None:
+    """注册失败台账自动重试任务。
+
+    每个周期先查各来源是否有到期（next_retry_at 已过）的失败记录，
+    有才触发 retry_failed 运行；没有则静默跳过，不产生运行历史和日志。
+    可通过 crawler.retry_failed.enabled: false 关闭。
+    """
+    retry_config = ((full_config.get("crawler") or {}).get("retry_failed") or {})
+    if not retry_config.get("enabled", True):
+        log.info("失败台账自动重试已关闭 (crawler.retry_failed.enabled)")
+        return
+    try:
+        interval_minutes = max(5, int(retry_config.get("interval_minutes", 60)))
+    except (TypeError, ValueError):
+        interval_minutes = 60
+
+    def retry_job():
+        try:
+            from main import crawl_sources
+            from scrapers.infrastructure import build_failure_store
+            from scrapers.registry import source_registry
+
+            config = get_config() or {}
+            store = build_failure_store(
+                mongodb_enabled=bool(get_config("mongodb.enable", False)),
+            )
+            due_sources = [
+                name
+                for name in source_registry.names()
+                if source_registry.is_enabled(config, name)
+                and store.due_targets(name)
+            ]
+            if not due_sources:
+                return
+            log.info(f"失败台账自动重试触发: {due_sources}")
+            run_async_task(crawl_sources(due_sources, retry_failed=True))
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "失败台账自动重试出错")
+
+    manager.add_interval_job(
+        retry_job,
+        interval_minutes * 60,
+        "retry_failed_auto",
+        "失败台账自动重试",
+        max_instances=1,
+    )
+
+
 def setup_default_scheduler() -> SchedulerManager:
     """设置默认调度器"""
     manager = SchedulerManager()
-    
+
     if not manager.initialize():
         raise RuntimeError("调度器初始化失败")
-    
+
     # 优先使用每来源独立调度；未配置时兼容旧的全量 cron。
     full_config = get_config() or {}
+    _add_retry_failed_job(manager, full_config)
     crawler_sources = ((full_config.get("crawler") or {}).get("sources") or {})
     source_jobs = 0
     if crawler_sources:
