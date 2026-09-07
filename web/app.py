@@ -134,6 +134,11 @@ def create_app(
 
     @app.get("/")
     def index():
+        if not _INDEX_PATH.exists():
+            raise HTTPException(
+                status_code=503,
+                detail="管理页文件缺失: web/index.html（镜像构建不完整）",
+            )
         return FileResponse(_INDEX_PATH, media_type="text/html")
 
     # ---------- 状态 ----------
