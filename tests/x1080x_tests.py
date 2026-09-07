@@ -5,6 +5,7 @@ from scrapers.core.cf_challenge import is_cf_challenge
 from scrapers.core.contracts import CrawlContext, CrawlTarget
 from scrapers.core.models import FetchResult
 from scrapers.sources.x1080x import X1080XParser, X1080XRepository, X1080XSource
+from util.javbee_code import resolve_x1080x_code
 from util.mongo import X1080X_RESOURCE_FIELDS, save_x1080x_items
 from util.resource_clock import fingerprint
 
@@ -122,6 +123,32 @@ class X1080XParserTests(unittest.TestCase):
         self.assertIsNone(
             self.parser.parse_detail(html, "https://x/1", tid=1, fid=244)
         )
+
+
+class X1080XCodeResolutionTests(unittest.TestCase):
+    def test_extracts_code_from_title_bracket(self):
+        r = resolve_x1080x_code(
+            "(杏吧傳媒)(xb-5441)(20260828)公園情趣絲襪長凳椅大戰騷爆"
+        )
+        self.assertEqual("XB-5441", r.code)
+        self.assertEqual(("title", "bracket", "high"), (r.source, r.rule, r.confidence))
+
+    def test_fullwidth_brackets_and_date_bracket_not_confused(self):
+        r = resolve_x1080x_code("（杏吧傳媒）（xb-5507）（20260830）極品大學生")
+        self.assertEqual("XB-5507", r.code)
+        self.assertIsNone(resolve_x1080x_code("(20260830)只有日期括号").code)
+
+    def test_falls_back_to_magnet_dn(self):
+        r = resolve_x1080x_code(
+            "纯描述标题没有括号",
+            ["magnet:?xt=urn:btih:abc&dn=xb-5507"],
+        )
+        self.assertEqual("XB-5507", r.code)
+        self.assertEqual("magnet_dn", r.rule)
+
+    def test_falls_back_to_javbee_title_rules(self):
+        r = resolve_x1080x_code("[FHD] MIDV-086 标题文本")
+        self.assertEqual("MIDV-086", r.code)
 
 
 class X1080XSourceTests(unittest.TestCase):

@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from util.javbee_code import normalize_code_key, resolve_javbee_code
+from util.javbee_code import normalize_code_key, resolve_x1080x_code
 
 _TID_QUERY_RE = re.compile(r"(?:^|[?&])tid=(\d+)")
 _TID_PATH_RE = re.compile(r"(?:^|/)thread-(\d+)-")
@@ -112,7 +112,7 @@ class X1080XParser:
             or str(section or "")
         )
 
-        code_resolution = resolve_javbee_code(None, title)
+        code_resolution = resolve_x1080x_code(title, magnets)
         return {
             "source_key": str(tid),
             "tid": int(tid),

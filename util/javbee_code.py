@@ -3,6 +3,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import unquote
 
 
 _QUALITY_PREFIX_RE = re.compile(
@@ -121,3 +122,55 @@ def resolve_javbee_code(existing_code, title) -> JavbeeCodeResolution:
 def _title_kind(title_without_quality: str, matched_code: str) -> str:
     remainder = title_without_quality[len(matched_code):].strip()
     return "catalog_only" if not remainder else "descriptive"
+
+
+# x1080x 标题番号在括号里，如「(杏吧傳媒)(xb-5441)(20260828)标题」；
+# 要求字母开头 + 数字结尾，纯数字括号（日期）与纯文字括号（厂牌）不会命中。
+_BRACKET_CODE_RE = re.compile(
+    r"[（(]\s*([A-Z]{2,15}[-_ ]?\d{2,9})\s*[）)]",
+    re.IGNORECASE,
+)
+_MAGNET_DN_RE = re.compile(r"[?&]dn=([^&\s]+)", re.IGNORECASE)
+_DN_CODE_RE = re.compile(r"^([A-Z]{2,15})[-_]?(\d{2,9})$", re.IGNORECASE)
+
+
+def _format_code(letters: str, digits: str) -> str:
+    return f"{letters.upper()}-{digits}"
+
+
+def resolve_x1080x_code(title, magnets=()) -> JavbeeCodeResolution:
+    """x1080x 番号识别：标题括号 → 磁链 dn 参数 → 复用 javbee 开头规则。"""
+    normalized_title = normalize_text(title)
+    match = _BRACKET_CODE_RE.search(normalized_title)
+    if match:
+        candidate = match.group(1)
+        parts = _DN_CODE_RE.match(candidate.replace(" ", "-"))
+        code = (
+            _format_code(parts.group(1), parts.group(2))
+            if parts
+            else candidate.upper().replace("_", "-").replace(" ", "-")
+        )
+        return JavbeeCodeResolution(
+            code=code,
+            source="title",
+            confidence="high",
+            rule="bracket",
+            title_kind="descriptive",
+        )
+
+    for magnet in magnets or ():
+        dn_match = _MAGNET_DN_RE.search(str(magnet or ""))
+        if not dn_match:
+            continue
+        dn_value = unquote(dn_match.group(1)).strip()
+        parts = _DN_CODE_RE.match(dn_value)
+        if parts:
+            return JavbeeCodeResolution(
+                code=_format_code(parts.group(1), parts.group(2)),
+                source="magnet_dn",
+                confidence="high",
+                rule="magnet_dn",
+                title_kind="descriptive" if normalized_title else "missing",
+            )
+
+    return resolve_javbee_code(None, title)
