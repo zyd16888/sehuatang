@@ -3,6 +3,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -162,6 +163,45 @@ class ActionTests(unittest.TestCase):
         response = client.post("/api/actions/restart", headers=self.headers)
         self.assertEqual(200, response.status_code)
         self.assertTrue(called.wait(timeout=3))
+
+
+class LogsEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.client, _ = make_client(self.tmp.name)
+        self.headers = {"X-Token": "test-token"}
+        self.logs_dir = Path(self.tmp.name) / "logs"
+        self.logs_dir.mkdir()
+        patcher = mock.patch("util.log_util.logs_dir", self.logs_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_rejects_unknown_file(self):
+        response = self.client.get("/api/logs?file=other", headers=self.headers)
+        self.assertEqual(400, response.status_code)
+
+    def test_missing_file_returns_empty(self):
+        data = self.client.get("/api/logs", headers=self.headers).json()
+        self.assertEqual([], data["lines"])
+
+    def test_returns_last_lines_of_large_file(self):
+        (self.logs_dir / "crawler.log").write_text(
+            "\n".join(f"line-{i}" for i in range(1, 2001)) + "\n",
+            encoding="utf-8",
+        )
+        data = self.client.get(
+            "/api/logs?lines=10", headers=self.headers
+        ).json()
+        self.assertEqual(10, len(data["lines"]))
+        self.assertEqual("line-2000", data["lines"][-1])
+
+    def test_error_log_selectable(self):
+        (self.logs_dir / "error.log").write_text("boom\n", encoding="utf-8")
+        data = self.client.get(
+            "/api/logs?file=error", headers=self.headers
+        ).json()
+        self.assertEqual(["boom"], data["lines"])
 
 
 class RegistryLockTests(unittest.TestCase):

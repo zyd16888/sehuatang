@@ -235,6 +235,33 @@ def create_app(
         store = PageCheckpointStore()
         return {"path": str(store.path), "progress": store._read()}
 
+    @app.get("/api/logs", dependencies=[Depends(require_auth)])
+    def tail_logs(file: str = "crawler", lines: int = 200):
+        from util.log_util import logs_dir
+
+        if file not in {"crawler", "error"}:
+            raise HTTPException(status_code=400, detail=f"未知日志文件: {file}")
+        lines = max(1, min(1000, int(lines)))
+        log_path = logs_dir / f"{file}.log"
+        if not log_path.exists():
+            return {"file": file, "lines": []}
+        try:
+            # 只读尾部固定大小，避免大文件全量读入
+            max_bytes = lines * 512
+            with log_path.open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - max_bytes))
+                chunk = fh.read()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"读取日志失败: {exc}")
+        text = chunk.decode("utf-8", errors="replace")
+        rows = text.splitlines()
+        # 尾部截断读取时第一行可能不完整，丢弃
+        if size > max_bytes and rows:
+            rows = rows[1:]
+        return {"file": file, "lines": rows[-lines:]}
+
     # ---------- 动作 ----------
 
     @app.post("/api/actions/crawl", dependencies=[Depends(require_auth)])

@@ -53,6 +53,8 @@
   th { background: #fafbfc; color: var(--muted); font-weight: 500; white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
   .scroll { overflow-x: auto; }
+  .scroll.tall { max-height: 360px; overflow-y: auto; }
+  .scroll.tall th { position: sticky; top: 0; z-index: 1; }
   input[type=number], input[type=text], select {
     font: inherit; font-size: 13px; padding: 4px 8px;
     border: 1px solid var(--line); border-radius: 6px; background: var(--card);
@@ -70,6 +72,11 @@
   }
   #toast.show { opacity: .95; }
   .hint { color: var(--muted); font-size: 12px; }
+  #logBox {
+    margin: 10px 0 0; padding: 10px; max-height: 420px; overflow: auto;
+    background: #1e2530; color: #d7dde5; font: 12px/1.5 Consolas, monospace;
+    border-radius: 8px; white-space: pre;
+  }
 </style>
 </head>
 <body>
@@ -84,6 +91,7 @@
     <h2>来源状态</h2>
     <div id="sources" class="cards"></div>
     <p class="hint" id="jobsHint"></p>
+    <p class="hint" id="actionsHint" style="color: var(--accent)"></p>
   </section>
 
   <section>
@@ -107,7 +115,7 @@
 
   <section>
     <h2>失败台账 <span class="hint" id="dueHint"></span></h2>
-    <div class="scroll">
+    <div class="scroll tall">
       <table id="failures">
         <thead><tr><th>来源</th><th>key</th><th>阶段</th><th>错误</th><th>次数</th><th>下次重试</th></tr></thead>
         <tbody></tbody>
@@ -123,6 +131,20 @@
         <tbody></tbody>
       </table>
     </div>
+  </section>
+
+  <section>
+    <h2>日志</h2>
+    <form class="inline" onsubmit="return false">
+      <select id="logFile" onchange="refreshLogs()">
+        <option value="crawler">crawler.log</option>
+        <option value="error">error.log</option>
+      </select>
+      <label>行数 <input type="number" id="logLines" value="200" min="10" max="1000" onchange="refreshLogs()"></label>
+      <label><input type="checkbox" id="logAuto" checked> 自动刷新</label>
+      <button onclick="refreshLogs()">刷新</button>
+    </form>
+    <pre id="logBox">加载中…</pre>
   </section>
 
   <section>
@@ -219,6 +241,29 @@ async function refreshStatus() {
   $("jobsHint").textContent = jobs.length
     ? "调度任务：" + jobs.map((job) => `${job.name} → ${fmtTime(job.next_run_time)}`).join("；")
     : "当前进程没有运行调度器任务";
+
+  const actions = Object.values(data.actions || {}).filter((a) => a.running);
+  $("actionsHint").textContent = actions.length
+    ? "进行中动作：" + actions
+        .map((a) => `${a.description}（已运行 ${fmtElapsed(a.started_at)}）`).join("；")
+    : "";
+}
+
+function fmtElapsed(startedAt) {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - startedAt));
+  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
+  return `${(seconds / 3600).toFixed(1)} 小时`;
+}
+
+async function refreshLogs() {
+  const lines = Math.max(10, Math.min(1000, Number($("logLines").value) || 200));
+  const data = await api(`/api/logs?file=${$("logFile").value}&lines=${lines}`);
+  const box = $("logBox");
+  // 已滚动到底部时刷新后继续跟随最新日志
+  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 20;
+  box.textContent = (data.lines || []).join("\n") || "（日志为空）";
+  if (stick) box.scrollTop = box.scrollHeight;
 }
 
 async function refreshRuns() {
@@ -233,7 +278,7 @@ async function refreshRuns() {
 }
 
 async function refreshFailures() {
-  const data = await api("/api/failures?limit=100");
+  const data = await api("/api/failures?limit=200");
   const due = Object.entries(data.due_counts || {})
     .map(([source, count]) => `${source} 到期 ${count}`).join("，");
   $("dueHint").textContent = due ? `（${due}）` : "";
@@ -323,7 +368,11 @@ async function refreshAll() {
 
 loadConfig().catch(() => {});
 refreshAll();
-setInterval(() => { refreshStatus().catch(() => {}); }, 5000);
+refreshLogs().then(() => { $("logBox").scrollTop = $("logBox").scrollHeight; }).catch(() => {});
+setInterval(() => {
+  refreshStatus().catch(() => {});
+  if ($("logAuto").checked) refreshLogs().catch(() => {});
+}, 5000);
 setInterval(() => {
   refreshRuns().catch(() => {});
   refreshFailures().catch(() => {});
