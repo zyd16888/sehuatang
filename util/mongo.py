@@ -22,6 +22,10 @@ db = client.sehuatang
 JAVBEE_COLLECTION_NAME = "javbee_items"
 X1080X_COLLECTION_NAME = "x1080x_items"
 CRAWL_FAILURE_COLLECTION_NAME = "crawl_failures"
+CRAWL_RUN_COLLECTION_NAME = "crawl_runs"
+
+# 运行历史保留 90 天，由 TTL 索引自动清理
+CRAWL_RUN_TTL_SECONDS = 90 * 24 * 3600
 
 # x1080x 的 typeid/section 归类变化也算有效资源变更；magnets 覆盖多磁链场景。
 X1080X_RESOURCE_FIELDS = RESOURCE_FIELDS + ("magnets", "typeid", "section")
@@ -389,6 +393,67 @@ def save_javbee_items(data_list, collection=None):
         f"modified={summary['modified']} upserted={summary['upserted']}"
     )
     return summary
+
+
+def get_crawl_run_collection():
+    return db[CRAWL_RUN_COLLECTION_NAME]
+
+
+def ensure_crawl_run_indexes(collection=None):
+    if collection is None:
+        collection = get_crawl_run_collection()
+    collection.create_index(
+        [("source", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
+        name="idx_source_created",
+    )
+    collection.create_index(
+        [("created_at", pymongo.ASCENDING)],
+        name="ttl_created_at",
+        expireAfterSeconds=CRAWL_RUN_TTL_SECONDS,
+    )
+
+
+def record_crawl_run(summary, collection=None):
+    """保存一次来源运行的汇总结果，供管理页展示历史。"""
+    if not summary or not summary.get("source"):
+        return
+    if collection is None:
+        collection = get_crawl_run_collection()
+    ensure_crawl_run_indexes(collection)
+    document = dict(summary)
+    document["created_at"] = datetime.now(timezone.utc)
+    collection.insert_one(document)
+
+
+def find_recent_crawl_runs(source=None, limit=20, collection=None):
+    if collection is None:
+        collection = get_crawl_run_collection()
+    query = {"source": source} if source else {}
+    rows = collection.find(query, {"_id": 0}).sort(
+        "created_at", pymongo.DESCENDING
+    ).limit(max(1, min(200, int(limit))))
+    return list(rows)
+
+
+def list_crawl_failures(source=None, limit=100, collection=None):
+    """列出失败台账（按最近失败时间倒序），并统计各来源到期待重试数。"""
+    if collection is None:
+        collection = get_crawl_failure_collection()
+    now = datetime.now(timezone.utc)
+    query = {"source": source} if source else {}
+    rows = list(
+        collection.find(query, {"_id": 0, "metadata": 0}).sort(
+            "last_failed_at", pymongo.DESCENDING
+        ).limit(max(1, min(500, int(limit))))
+    )
+    due_counts = {
+        row["_id"]: row["count"]
+        for row in collection.aggregate([
+            {"$match": {"resolved_at": None, "next_retry_at": {"$lte": now}}},
+            {"$group": {"_id": "$source", "count": {"$sum": 1}}},
+        ])
+    }
+    return rows, due_counts
 
 
 def get_x1080x_collection():

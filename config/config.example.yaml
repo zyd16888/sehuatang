@@ -119,6 +119,15 @@ sendMessage:
   tg_chat_id: "your_chat_id"
   image_proxy_url: "https://your-image-proxy.com"
 
+# Web 管理页（--mode web）
+web:
+  # 本机默认 127.0.0.1；docker 内默认 0.0.0.0
+  host: "127.0.0.1"
+  port: 8181
+  # 监听非本机地址时必须设置 token（或环境变量 SHT_WEB_TOKEN），
+  # 未设置 token 时仅允许本机访问
+  token: ""
+
 # 日志配置
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL

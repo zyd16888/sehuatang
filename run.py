@@ -126,6 +126,42 @@ class ApplicationRunner:
             ExceptionHandler.handle_and_log(e, "执行 Javbee 抓取任务时出错")
             return False
 
+    def run_web(self):
+        """运行管理页（调度器 + Web 管理界面）。"""
+        try:
+            import uvicorn
+            from util.read_config import get_config
+            from web import create_app
+
+            self.scheduler_manager = get_scheduler_manager()
+            if not self.scheduler_manager.start():
+                log.warning("调度器启动失败，管理页仍将启动")
+
+            default_host = (
+                "0.0.0.0" if os.getenv("DOCKER_CONTAINER") else "127.0.0.1"
+            )
+            host = str(get_config("web.host", default_host))
+            port = int(get_config("web.port", 8181))
+            token = str(
+                os.getenv("SHT_WEB_TOKEN") or get_config("web.token", "") or ""
+            ).strip()
+            if host not in ("127.0.0.1", "localhost", "::1") and not token:
+                log.warning(
+                    "管理页监听非本机地址但未配置 token，"
+                    "非本机请求将被拒绝；请设置 web.token 或 SHT_WEB_TOKEN"
+                )
+
+            log.info(f"🌐 管理页启动: http://{host}:{port}")
+            app = create_app(scheduler_manager=self.scheduler_manager)
+            uvicorn.run(app, host=host, port=port, log_level="warning")
+            return True
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "运行管理页时出错")
+            return False
+        finally:
+            if self.scheduler_manager:
+                self.scheduler_manager.stop()
+
     def run_backfill_pages(
         self,
         source,
@@ -229,6 +265,7 @@ def create_argument_parser():
         epilog="""
 运行模式说明:
   scheduler  - 定时调度模式（默认）
+  web       - 调度器 + Web 管理页
   once      - 单次执行模式
   health    - 健康检查模式
   backfill  - 按年份补抓历史数据
@@ -259,7 +296,7 @@ def create_argument_parser():
 
     parser.add_argument(
         "--mode",
-        choices=["scheduler", "once", "health", "backfill", "javbee"],
+        choices=["scheduler", "once", "health", "backfill", "javbee", "web"],
         default="scheduler",
         help="运行模式 (默认: scheduler)"
     )
@@ -383,6 +420,8 @@ def main():
             )
         elif args.mode == "once":
             success = runner.run_once(dry_run=args.dry_run)
+        elif args.mode == "web":
+            success = runner.run_web()
         elif args.mode == "health":
             success = runner.health_check()
         elif args.mode == "backfill":

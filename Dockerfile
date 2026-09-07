@@ -48,7 +48,7 @@ LABEL org.opencontainers.image.version=${VERSION}
 LABEL org.opencontainers.image.revision=${REVISION}
 LABEL org.opencontainers.image.licenses="MIT"
 
-EXPOSE 8080
+EXPOSE 8181
 
 ENV DOCKER_CONTAINER=true
-CMD ["python", "run.py"]
+CMD ["python", "run.py", "--mode", "web"]

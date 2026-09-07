@@ -108,6 +108,21 @@ CRAWLER_SEHUATANG_FLARESOLVERR_URL
 `proxy` 配置仍可读取，但新配置应使用 `crawler.sources.<source>`，避免同名配置
 串值。
 
+## Web 管理页
+
+```powershell
+python run.py --mode web
+```
+
+调度器 + 管理页一起运行（docker 默认入口）。页面地址 `http://127.0.0.1:8181`，
+提供：来源状态与手动触发（抓取 / dry-run / 重试失败）、分页补抓触发与进度、
+失败台账、运行历史（`crawl_runs` collection，保留 90 天）、配置文件在线编辑
+（保存前校验 YAML，原文件备份为 `config.yaml.bak`，重启后生效）和一键重启。
+
+安全约定：未配置 token 时仅允许本机访问；监听非本机地址（含 docker）必须设置
+`web.token` 或环境变量 `SHT_WEB_TOKEN`，页面右上角 Token 按钮填入。同一来源
+的手动触发与调度任务在进程内互斥，重复触发会得到 `already_running`。
+
 ## 运行命令
 
 ```powershell
@@ -193,8 +208,10 @@ docker compose logs -f sehuatang-crawler
 docker compose down
 ```
 
-容器直接运行 `python run.py`。配置目录以只读方式挂载到 `/app/config`，日志和
-运行状态分别挂载到 `/app/logs`、`/app/data`。需要 FlareSolverr 时：
+容器默认运行 `python run.py --mode web`（调度器 + 管理页，端口 8181，请配置
+`SHT_WEB_TOKEN`）。配置目录挂载到 `/app/config`（管理页需要写入），日志和
+运行状态分别挂载到 `/app/logs`、`/app/data`。管理页的重启按钮通过退出进程
+配合 `restart: unless-stopped` 实现容器级重启。需要 FlareSolverr 时：
 
 ```powershell
 $env:CRAWLER_SEHUATANG_FLARESOLVERR_URL = "http://flaresolverr:8191/v1"
@@ -233,7 +250,8 @@ mamba run -n ame python -m unittest `
   tests.sehuatang_source_tests `
   tests.extract_and_query_tests `
   tests.x1080x_tests `
-  tests.page_backfill_tests
+  tests.page_backfill_tests `
+  tests.web_app_tests
 
 mamba run -n ame python -m compileall -q main.py run.py scrapers util tests
 python run.py --mode health

@@ -9,6 +9,10 @@ curl_cffi>=0.7.0
 # 调度器
 apscheduler
 
+# Web 管理页
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
 # Telegram 推送通知
 pyTelegramBotAPI>=4.14.0
 

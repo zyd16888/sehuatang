@@ -17,9 +17,13 @@ services:
 
     # 挂载卷
     volumes:
-      - ./config:/app/config:ro  # 配置文件（只读）
+      - ./config:/app/config     # 配置文件（管理页需要写入）
       - ./logs:/app/logs         # 日志文件
       - crawler_data:/app/data   # 数据目录
+
+    # Web 管理页端口（--mode web 时使用；务必配置 web.token 或 SHT_WEB_TOKEN）
+    ports:
+      - "8181:8181"
 
     # 网络配置
     networks:
@@ -42,8 +46,8 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # 默认命令
-    command: ["python", "run.py"]
+    # 默认命令：调度器 + Web 管理页
+    command: ["python", "run.py", "--mode", "web"]
 
   # CF 过盾服务（仅在遇到 Cloudflare 挑战时需要，用 --profile flaresolverr 启动）
   flaresolverr:

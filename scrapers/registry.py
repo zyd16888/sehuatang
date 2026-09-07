@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
 
@@ -130,14 +131,38 @@ async def _run_x1080x(
 class SourceRegistry:
     def __init__(self):
         self._sources: Dict[str, SourceDefinition] = {}
+        self._run_locks: Dict[str, threading.Lock] = {}
 
     def register(self, definition: SourceDefinition) -> None:
         if definition.name in self._sources:
             raise ValueError(f"来源重复注册: {definition.name}")
         self._sources[definition.name] = definition
+        self._run_locks[definition.name] = threading.Lock()
 
     def names(self):
         return tuple(self._sources)
+
+    def running_sources(self):
+        """返回当前进程内正在运行的来源名。"""
+        return tuple(
+            name for name, lock in self._run_locks.items() if lock.locked()
+        )
+
+    @staticmethod
+    def _record_run(result: Mapping[str, Any]) -> None:
+        """把运行结果落库；MongoDB 未启用或写入失败时静默跳过。"""
+        if not result or result.get("status") == "skipped":
+            return
+        try:
+            from util.read_config import get_config
+
+            if not get_config("mongodb.enable", False):
+                return
+            from util.mongo import record_crawl_run
+
+            record_crawl_run(result)
+        except Exception as exc:
+            log.warning(f"运行历史落库失败: {exc}")
 
     def is_enabled(self, config: Mapping[str, Any], name: str) -> bool:
         definition = self._sources[name]
@@ -163,12 +188,22 @@ class SourceRegistry:
         if not force and not self.is_enabled(config, name):
             log.info(f"来源未启用，跳过: source={name}")
             return {"source": name, "status": "skipped"}
-        return await self._sources[name].runner(
-            config,
-            force=force,
-            dry_run=dry_run,
-            retry_failed=retry_failed,
-        )
+
+        lock = self._run_locks[name]
+        if not lock.acquire(blocking=False):
+            log.warning(f"来源已在运行中，跳过本次触发: source={name}")
+            return {"source": name, "status": "already_running"}
+        try:
+            result = await self._sources[name].runner(
+                config,
+                force=force,
+                dry_run=dry_run,
+                retry_failed=retry_failed,
+            )
+        finally:
+            lock.release()
+        self._record_run(result)
+        return result
 
     async def run_many(
         self,
@@ -187,6 +222,7 @@ class SourceRegistry:
                     "status": "failed",
                     "error": str(exc),
                 }
+                self._record_run(results[name])
         return results
 
 
