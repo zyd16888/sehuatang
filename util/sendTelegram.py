@@ -1,35 +1,9 @@
-import telebot
+"""Telegram 消费端：格式化、图片下载与发送，导入模块不会创建 Bot。"""
 import re
-from telebot.types import InputMediaPhoto
-from telebot.util import antiflood
-from telebot import apihelper
 import time
-import math
-from util.log_util import log
-from util.config import (
-    tg_bot_token,
-    tg_chat_id,
-    fid_json,
-    tg_enable,
-    proxy,
-    image_proxy_url,
-)
 
-if tg_enable:
-    bot = telebot.TeleBot(tg_bot_token)
-    if proxy is not None:
-        apihelper.proxy = {
-            "http": proxy,
-            "https": proxy,
-        }
-else:
-    bot = telebot.TeleBot(tg_bot_token)
-    if proxy is not None:
-        apihelper.proxy = {
-            "http": proxy,
-            "https": proxy,
-        }
-    log.info("telegram bot send image is disabled")
+from util.log_util import log
+from util.read_config import get_config
 
 
 def special_char_sub(text):
@@ -97,132 +71,6 @@ def special_char_sub(text):
     return text
 
 
-def send_media_group(data_list, fid):
-    tag_name = fid_json.get(fid, "other")
-
-    for data in data_list:
-        magnet = data["magnet"]
-        magnet_115 = data["magnet_115"]
-        title = data["title"]
-        num = data["number"]
-        post_time = data["post_time"]
-        image_list = data["img"]
-
-        # 处理文本信息
-        if magnet_115 is None:
-            content = f"\n{num} {title}\n\n磁力链接：\n`{magnet}`\n\n发布时间：{post_time}\n\n #{tag_name}"
-        else:
-            content = f"\n{num} {title}\n\n磁力链接：\n`{magnet}`\n防115屏蔽压缩包磁链：\n`{magnet_115}`\n\n发布时间：{post_time}\n\n #{tag_name} "
-
-        content = special_char_sub(content)
-
-        # 限制每次最多发送10张图片
-        batch_size = 10
-        num_batches = math.ceil(len(image_list) / batch_size)
-
-        for batch_index in range(num_batches):
-            media_group = []
-            batch_images = image_list[
-                batch_index * batch_size : (batch_index + 1) * batch_size
-            ]
-
-            for index, image in enumerate(batch_images):
-                # 替换图片域名
-                pattern = r"(https?://)([^/]+)/tupian"
-                image = re.sub(pattern, rf"{image_proxy_url}/tupian", image)
-                log.debug(image)
-
-                # 只有最后一张图片带 caption（仅在最后一组发送）
-                if batch_index == num_batches - 1 and index == len(batch_images) - 1:
-                    media_group.append(
-                        InputMediaPhoto(
-                            media=image, caption=content, parse_mode="markdownV2"
-                        )
-                    )
-                else:
-                    media_group.append(InputMediaPhoto(media=image))
-
-            try:
-                msg = antiflood(
-                    bot.send_media_group, chat_id=tg_chat_id, media=media_group
-                )
-                log.info(
-                    f"send_media_group, batch {batch_index+1}/{num_batches}, msg id: "
-                    f"{' '.join([str(i.json.get('message_id')) for i in msg])}"
-                )
-            except Exception as e:
-                log.error(f"Failed to send media group: {e}")
-                log.debug(media_group)
-
-    # 发送文本消息
-    # if len(data_list) > 0:
-    #     send_message_text = rec_message(data_list, fid)
-
-    # if send_message_text:  # 确保消息内容不为空
-    #     msg = antiflood(
-    #         bot.send_message, chat_id=tg_chat_id, text=send_message_text
-    #     )
-    #     log.info(f"send telegram message, return msg: {msg.json}")
-    # else:
-    #     log.debug("rec_message returned an empty message, skipping send_message")
-
-
-def _send_media_batches(image_list, content):
-    """按每批 10 张发送图片组，caption 挂在最后一张；无图时发纯文本。
-
-    返回是否至少成功发送了一条消息。
-    """
-    if not image_list:
-        try:
-            antiflood(
-                bot.send_message,
-                chat_id=tg_chat_id,
-                text=content,
-                parse_mode="markdownV2",
-            )
-            return True
-        except Exception as e:
-            log.error(f"Failed to send text message: {e}")
-            return False
-
-    batch_size = 10
-    num_batches = math.ceil(len(image_list) / batch_size)
-    sent_any = False
-    for batch_index in range(num_batches):
-        media_group = []
-        batch_images = image_list[
-            batch_index * batch_size : (batch_index + 1) * batch_size
-        ]
-        for index, image in enumerate(batch_images):
-            if batch_index == num_batches - 1 and index == len(batch_images) - 1:
-                media_group.append(
-                    InputMediaPhoto(
-                        media=image, caption=content, parse_mode="markdownV2"
-                    )
-                )
-            else:
-                media_group.append(InputMediaPhoto(media=image))
-        try:
-            antiflood(bot.send_media_group, chat_id=tg_chat_id, media=media_group)
-            sent_any = True
-        except Exception as e:
-            log.error(f"Failed to send media group: {e}")
-
-    if not sent_any:
-        # 图片全部失败时退回纯文本，保证通知不丢
-        try:
-            antiflood(
-                bot.send_message,
-                chat_id=tg_chat_id,
-                text=content,
-                parse_mode="markdownV2",
-            )
-            sent_any = True
-        except Exception as e:
-            log.error(f"Failed to send fallback text message: {e}")
-    return sent_any
-
-
 def _fetch_hotlinked_image(url, timeout=20):
     """下载有防盗链的图片，返回字节；失败返回 None。
 
@@ -260,94 +108,130 @@ def _fetch_hotlinked_image(url, timeout=20):
     return None
 
 
-def send_x1080x_media_group(data_list):
-    """推送 x1080x 增量新资源，格式与 sehuatang 推送保持一致。
 
-    图片先带 Referer 下载成字节再按文件上传（图床有防盗链，
-    Telegram 服务器直接拉 URL 会 404）；下载失败的图跳过。
-    """
-    for data in data_list:
-        code = data.get("code") or ""
-        title = data.get("title") or ""
-        magnet = data.get("magnet") or ""
-        date = data.get("date") or ""
-        section = str(data.get("section") or "").strip()
-        image_list = list(data.get("img") or [])
-
-        header = f"{code} {title}".strip()
-        tags = "#x1080x" + (f" #{section}" if section else "")
-        content = (
-            f"\n{header}\n\n磁力链接：\n`{magnet}`\n\n"
-            f"发布日期：{date}\n\n{tags}"
-        )
-        content = special_char_sub(content)
-
-        prepared_images = []
-        for image_url in image_list:
-            payload = _fetch_hotlinked_image(image_url)
-            if payload is not None:
-                prepared_images.append(payload)
-        _send_media_batches(prepared_images, content)
+def _text_parts(text):
+    return [{"method": "text", "text": text[start:start + 4000]}
+            for start in range(0, len(text), 4000)]
 
 
-MAX_MESSAGE_LENGTH = 4000  # 预留一些字符，防止超限
+class TelegramSender:
+    def __init__(self, bot=None, chat_id=None, min_interval=None, sleeper=time.sleep, stop_event=None):
+        self._bot = bot
+        self.chat_id = chat_id if chat_id is not None else get_config("sendMessage.tg_chat_id")
+        self.min_interval = max(0, float(min_interval if min_interval is not None else
+                                       get_config("sendMessage.queue.min_interval_seconds", 1)))
+        self._sleep = sleeper
+        self._next_send_at = 0
+        self._stop_event = stop_event
 
-def rec_message(data_list, fid):
-    if not data_list:
-        log.debug("data_list is empty, skipping send_message")
-        return  # 直接返回，避免发送空消息
+    def _check_stopped(self):
+        if self._stop_event is not None and self._stop_event.is_set():
+            raise InterruptedError("通知发送已停止")
 
-    tag_name = fid_json.get(fid, "other")
-    name_list = [data["number"] + " " + data["title"] for data in data_list]
-    time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    def _get_bot(self):
+        if self._bot is None:
+            import telebot
+            from telebot import apihelper
+            token = str(get_config("sendMessage.tg_bot_token", "") or "")
+            if not token or not self.chat_id:
+                raise ValueError("Telegram Token 或接收目标未配置")
+            self._bot = telebot.TeleBot(token)
+            proxy_url = get_config("proxy.proxy_url") if get_config("proxy.proxy_enable", False) else None
+            apihelper.proxy = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        return self._bot
 
-    # 先发送摘要
-    summary_text = (
-        f"#{tag_name} 抓取完成。\n\n"
-        f"本次抓取共 {len(data_list)} 个资源\n\n"
-        f"抓取时间：{time_str}\n\n"
-        f"抓取结果：\n"
-    )
+    def _call(self, method, **kwargs):
+        self._check_stopped()
+        delay = self._next_send_at - time.monotonic()
+        if delay > 0:
+            if self._stop_event is None:
+                self._sleep(delay)
+            elif self._stop_event.wait(delay):
+                raise InterruptedError("通知发送已停止")
+        try:
+            return getattr(self._get_bot(), method)(chat_id=self.chat_id, timeout=30, **kwargs)
+        finally:
+            self._next_send_at = time.monotonic() + self.min_interval
 
-    log.debug(f"Sending summary message:\n{summary_text}")
-    antiflood(bot.send_message, chat_id=tg_chat_id, text=summary_text)
+    def _parts(self, job):
+        data = job.payload
+        fid = data.get("fid")
+        names = get_config("sehuatang.fid", {}) or {}
+        tag = names.get(fid, names.get(str(fid), "other"))
+        if job.kind == "summary":
+            captured_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(job.created_at))
+            rows = data["names"]
+            summary = f"#{tag} 抓取完成。\n\n本次抓取共 {len(rows)} 个资源\n\n抓取时间：{captured_at}\n\n抓取结果：\n"
+            return _text_parts(summary) + _text_parts("\n".join(rows))
+        record = data["record"]
+        images = list(record.get("img") or [])
+        if job.source == "x1080x":
+            header = f"{record.get('code') or ''} {record.get('title') or ''}".strip()
+            tag = "#x1080x" + (f" #{record['section']}" if record.get("section") else "")
+            body = f"\n{header}\n\n磁力链接：\n`{record.get('magnet') or ''}`\n\n发布日期：{record.get('date') or ''}\n\n{tag}"
+        else:
+            body = f"\n{record.get('number') or ''} {record.get('title') or ''}\n\n磁力链接：\n`{record.get('magnet') or ''}`\n"
+            if record.get("magnet_115"):
+                body += f"防115屏蔽压缩包磁链：\n`{record['magnet_115']}`\n"
+            body += f"\n发布时间：{record.get('post_time') or ''}\n\n #{tag}"
+            origin = str(get_config("sendMessage.image_proxy_url", "") or "").rstrip("/")
+            if origin:
+                images = [re.sub(r"https?://[^/]+/tupian", lambda _: origin + "/tupian", url) for url in images]
+        formatted = special_char_sub(body)
+        if not images:
+            return ([{"method": "text", "text": formatted, "parse_mode": "MarkdownV2"}]
+                    if len(formatted) <= 4000 else _text_parts(body.replace("`", "")))
+        parts = []
+        for start in range(0, len(images), 10):
+            last = start + 10 >= len(images)
+            caption = formatted if last and len(formatted) <= 1024 else None
+            parts.append({"method": "media", "images": images[start:start + 10],
+                          "caption": caption, "download": job.source == "x1080x",
+                          "fallback_text": body.replace("`", "") if caption else None})
+        if len(formatted) > 1024:
+            parts.extend(_text_parts(body.replace("`", "")))
+        return parts
 
-    # 处理抓取结果，分批发送
-    current_batch = []
-    current_length = 0
+    def _send_part(self, part):
+        if part["method"] == "text":
+            return self._call("send_message", text=part["text"], parse_mode=part.get("parse_mode"))
+        from telebot.types import InputMediaPhoto
+        images = part["images"]
+        if part["download"]:
+            prepared = []
+            for url in images:
+                self._check_stopped()
+                payload = _fetch_hotlinked_image(url)
+                if payload is not None:
+                    prepared.append(payload)
+            images = prepared
+        caption = part.get("caption")
+        if not images:
+            return self._call("send_message", text=caption, parse_mode="MarkdownV2") if caption else []
+        try:
+            if len(images) == 1:
+                return self._call("send_photo", photo=images[0], caption=caption, parse_mode="MarkdownV2")
+            media = [InputMediaPhoto(media=image,
+                     caption=caption if index == len(images)-1 else None, parse_mode="MarkdownV2")
+                     for index, image in enumerate(images)]
+            return self._call("send_media_group", media=media)
+        except Exception as exc:
+            # 无效图片可降级为文本；限流和网络错误交回队列安排重试。
+            if getattr(exc, "error_code", None) == 400 and part.get("fallback_text"):
+                return self._call("send_message", text=part["fallback_text"])
+            if getattr(exc, "error_code", None) == 400 and not caption:
+                log.warning("图片组无法发送，跳过该组；文字说明由后续分组发送")
+                return []
+            raise
 
-    for name in name_list:
-        if current_length + len(name) + 1 > MAX_MESSAGE_LENGTH:
-            if current_batch:  # 确保 current_batch 不为空
-                batch_text = "\n".join(current_batch)
-                log.debug(f"Sending batch message:\n{batch_text}")
-                antiflood(bot.send_message, chat_id=tg_chat_id, text=batch_text)
-
-            # 清空批次，准备新的
-            current_batch = []
-            current_length = 0
-
-        # 加入当前批次
-        current_batch.append(name)
-        current_length += len(name) + 1  # 计算换行符的长度
-
-    # 发送剩余部分
-    if current_batch:  # 确保最后一条消息不为空
-        batch_text = "\n".join(current_batch)
-        log.debug(f"Sending final batch message:\n{batch_text}")
-        antiflood(bot.send_message, chat_id=tg_chat_id, text=batch_text)
-
-
-if __name__ == "__main__":
-    text = """
-com-452 中出しされたパパ活美少女 「ゴムして」って言ったよね
-
-磁力链接：
-`magnet:?xt=urn:btih:B1B5FB29ADCC2A05EECB7539AC70BFF455AB7CA7`
-
-发布时间：2025-05-26 12:32:48
-
-"""
-    text = special_char_sub(text)
-    print(text)
-    pass
+    def __call__(self, job):
+        if job.parts is None:
+            job.parts = self._parts(job)
+        while job.next_part < len(job.parts):
+            self._check_stopped()
+            result = self._send_part(job.parts[job.next_part])
+            messages = result if isinstance(result, (list, tuple)) else [result]
+            job.message_ids.extend(getattr(message, "message_id", None) for message in messages if message)
+            # 一个分组成功后马上推进；后续分组失败时不重发已经确认成功的分组。
+            job.next_part += 1
+        log.info(f"通知已发送: source={job.source} key={job.key} parts={job.next_part}")

@@ -865,6 +865,16 @@
               失败台账 <span class="tab-count" id="failureCount">—</span>
             </button>
             <button
+              id="tab-notifications"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-notifications"
+              tabindex="-1"
+              data-tab="notifications"
+            >
+              通知队列
+            </button>
+            <button
               id="tab-backfill"
               role="tab"
               aria-selected="false"
@@ -994,6 +1004,45 @@
           <div class="table-note">
             <span>最多显示最近 200 条；统计覆盖所选来源的全部台账</span
             ><span>重新入队保留历史累计次数</span>
+          </div>
+        </section>
+        <section
+          class="panel"
+          id="panel-notifications"
+          role="tabpanel"
+          aria-labelledby="tab-notifications"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>Telegram 通知队列</h2>
+              <p class="hint">
+                采集后自动入队，由发送线程顺序处理。仅保存在当前进程，重启后清空。
+              </p>
+            </div>
+            <span class="badge" id="notificationEnabled">读取中</span>
+          </div>
+          <div id="notificationStats" class="stats-line"></div>
+          <div id="notificationWarning" class="error-banner" hidden></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>入队时间</th>
+                  <th>来源 / 目标</th>
+                  <th>通知内容</th>
+                  <th>状态</th>
+                  <th>尝试次数</th>
+                  <th>分组进度</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="notificationBody"></tbody>
+            </table>
+          </div>
+          <div class="table-note">
+            <span>显示发送中的任务、最多 100 条等待任务和最近 100 条结果</span>
+            <span>失败重试从未完成的分组继续；数字统计仅覆盖本次进程</span>
           </div>
         </section>
         <section
@@ -1364,6 +1413,54 @@
             .join("") ||
           '<tr><td class="empty" colspan="7">当前筛选下没有失败记录。</td></tr>';
       }
+      async function refreshNotifications() {
+        const data = await api("/api/notifications");
+        const stateNames = {
+          queued: "等待发送",
+          sending: "发送中",
+          retry_wait: "等待重试",
+          sent: "已发送",
+          failed: "发送失败",
+          requeued: "已重新入队",
+          interrupted: "已中断",
+        };
+        $("notificationEnabled").textContent = data.closing
+          ? "队列正在关闭"
+          : data.enabled
+            ? "通知已启用"
+            : "通知未启用";
+        $("notificationEnabled").className =
+          "badge " + (data.enabled ? "ok" : "");
+        $("notificationStats").innerHTML =
+          `<span>等待 <b>${Number(data.queued)} / ${Number(data.capacity)}</b></span>
+          <span>处理中 <b>${data.active ? 1 : 0}</b></span><span>已发送 <b>${Number(data.sent)}</b></span>
+          <span>失败 <b>${Number(data.failed)}</b></span><span>未入队 <b>${Number(data.rejected)}</b></span>`;
+        $("notificationWarning").hidden = !data.rejected;
+        $("notificationWarning").textContent =
+          `本进程有 ${Number(data.rejected)} 条通知因队列已满或关闭未能入队；这些通知未保存在队列中。`;
+        const rows = [
+          ...(data.active ? [data.active] : []),
+          ...(data.pending || []),
+          ...(data.history || []),
+        ];
+        $("notificationBody").innerHTML =
+          rows
+            .map(
+              (row) => `<tr>
+          <td class="number">${fmtTime(new Date(row.created_at * 1000))}</td>
+          <td>${esc(row.source)}<span class="error-detail number">${esc(row.key)}</span></td>
+          <td><span class="error-detail" style="color:var(--ink)">${esc(row.title)}</span>
+            ${row.error ? `<span class="error-detail negative">${esc(row.error)}</span>` : ""}</td>
+          <td><span class="badge ${row.state === "failed" ? "failed" : row.state === "sent" ? "ok" : row.state === "sending" ? "running" : row.state === "retry_wait" ? "due" : ""}">${esc(stateNames[row.state] || row.state)}</span>
+            ${row.next_retry_at ? `<span class="error-detail">${fmtTime(new Date(row.next_retry_at * 1000))}</span>` : ""}</td>
+          <td class="number">${Number(row.attempts)} / ${Number(data.max_attempts)}</td>
+          <td class="number">${row.total_parts == null ? "—" : `${Number(row.completed_parts)} / ${Number(row.total_parts)}`}</td>
+          <td>${row.state === "failed" ? `<button class="requeue" data-notification-id="${esc(row.id)}" ${!data.enabled || data.closing ? "disabled" : ""}>重新入队</button>` : "—"}</td>
+        </tr>`,
+            )
+            .join("") ||
+          '<tr><td class="empty" colspan="7">当前进程暂无通知任务。</td></tr>';
+      }
       async function refreshBackfill() {
         const data = await api("/api/backfill-progress");
         $("progressBody").innerHTML =
@@ -1402,6 +1499,7 @@
       async function refreshPanel() {
         if (activeTab === "runs") await refreshRuns();
         else if (activeTab === "failures") await refreshFailures();
+        else if (activeTab === "notifications") await refreshNotifications();
         else if (activeTab === "backfill") await refreshBackfill();
         else if (activeTab === "logs") await refreshLogs();
         else if (!configLoaded) await loadConfig();
@@ -1444,6 +1542,16 @@
           },
           "已重新入队，可点击来源的「重试失败」立即执行",
         );
+      });
+      $("notificationBody").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-notification-id]");
+        if (button && !button.disabled)
+          act(
+            button,
+            "/api/notifications/retry",
+            { id: button.dataset.notificationId },
+            "通知已重新入队，将从未完成的分组继续",
+          );
       });
       $("backfillForm").addEventListener("submit", (event) => {
         event.preventDefault();

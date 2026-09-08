@@ -10,14 +10,13 @@ class X1080XRepository:
         existing_lookup: Callable,
         save_func: Callable,
         refresh_all: bool = False,
+        on_saved: Callable = None,
     ):
         self._existing_lookup = existing_lookup
         self._save_func = save_func
         self.refresh_all = bool(refresh_all)
         self.existing_count = 0
-        # 本轮累计成功入库的载荷（引擎分批保存会多次调用 save_many）；
-        # new_only 模式下即本次新增数据，供 Telegram 通知用
-        self.last_saved_payloads = []
+        self._on_saved = on_saved
 
     def select_targets(self, targets: Sequence[CrawlTarget]) -> List[CrawlTarget]:
         keys = [target.key for target in targets]
@@ -30,7 +29,8 @@ class X1080XRepository:
     def save_many(self, records: Sequence[CrawlRecord]) -> SaveResult:
         payloads = [dict(record.payload) for record in records]
         result = self._save_func(payloads)
-        self.last_saved_payloads.extend(payloads)
+        if self._on_saved is not None:
+            self._on_saved(payloads)
         return SaveResult(
             processed=int(result.get("processed", len(records))),
             saved=int(result.get("upserted", 0)),

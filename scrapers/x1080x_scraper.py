@@ -53,10 +53,13 @@ class X1080XScraper:
         retry_failed: bool = False,
     ) -> Dict[str, object]:
         source = X1080XSource(self.config)
+        notify = (not dry_run and not retry_failed and not self.config.get("refresh_all", False)
+                  and bool(self.config.get("notify_telegram", True)))
         repository = X1080XRepository(
             existing_lookup=find_existing_x1080x_keys,
             save_func=save_x1080x_items,
             refresh_all=bool(self.config.get("refresh_all", False)),
+            on_saved=self._enqueue_new_items if notify else None,
         )
         summary = CrawlEngine(self.http, self.failure_store).run(
             source,
@@ -65,7 +68,6 @@ class X1080XScraper:
             retry_failed=retry_failed,
         )
         summary.details["existing"] = repository.existing_count
-        self._notify_new_items(repository, dry_run=dry_run, retry_failed=retry_failed)
         result = summary.as_dict()
         log.info(
             "x1080x 抓取汇总: "
@@ -76,32 +78,13 @@ class X1080XScraper:
         )
         return result
 
-    def _notify_new_items(
-        self,
-        repository: X1080XRepository,
-        *,
-        dry_run: bool,
-        retry_failed: bool,
-    ) -> None:
-        """仅在定时/手动的增量抓取后推送新数据。
-
-        dry-run 不落库、retry-failed 是失败恢复、refresh_all 会重发旧数据，
-        这三种场景都不通知；backfill_pages 也不经过本方法。
-        """
-        if dry_run or retry_failed or repository.refresh_all:
-            return
-        if not repository.last_saved_payloads:
-            return
-        if not bool(self.config.get("notify_telegram", True)):
-            return
+    def _enqueue_new_items(self, payloads):
+        """每批成功保存后立即入队，后续抓取不等待图片下载与 Telegram。"""
         try:
             from scrapers.notification_manager import NotificationManager
-
-            NotificationManager().send_x1080x_notifications(
-                repository.last_saved_payloads
-            )
+            NotificationManager().enqueue_x1080x_notifications(payloads)
         except Exception as exc:
-            log.error(f"x1080x 通知发送失败（不影响抓取结果）: {exc}")
+            log.error(f"x1080x 通知入队失败（不影响抓取结果）: {type(exc).__name__}")
 
     def backfill_pages(
         self,
@@ -238,8 +221,6 @@ class X1080XScraper:
                 partition_summary["pages"] += 1
                 partition_summary["saved"] += page_run.saved
                 partition_summary["failed"] += page_run.failed
-                # 补抓不推送通知，及时清掉累计载荷，长区间补抓不占内存
-                repository.last_saved_payloads.clear()
 
                 if not dry_run:
                     checkpoints.save("x1080x", typeid, page)

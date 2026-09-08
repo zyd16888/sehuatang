@@ -258,6 +258,43 @@ class FailureLifecycleApiTests(unittest.TestCase):
         self.assertEqual({"ok": True, "requeued": 1}, result.json())
 
 
+class NotificationApiTests(unittest.TestCase):
+    def setUp(self):
+        from notifications.memory_queue import MemoryNotificationQueue, NotificationJob
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.queue = MemoryNotificationQueue(sender=mock.Mock(side_effect=ValueError("invalid target")))
+        self.addCleanup(lambda: self.queue.close(1))
+        self.queue.enqueue(NotificationJob("sehuatang", "42", "test", {}))
+        # 等待消费者记录终态；不关闭队列，以便验证手动重试。
+        until = time.monotonic() + 2
+        while not self.queue.snapshot()["history"] and time.monotonic() < until:
+            time.sleep(0.005)
+        patcher = mock.patch("notifications.memory_queue.get_notification_queue", return_value=self.queue)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client, _ = make_client(self.tmp.name)
+        self.headers = {"X-Token": "test-token"}
+
+    def test_read_is_authenticated_and_disabled_does_not_allow_retry(self):
+        self.assertEqual(401, self.client.get("/api/notifications").status_code)
+        state = self.client.get("/api/notifications", headers=self.headers).json()
+        self.assertEqual(1, state["failed"])
+        response = self.client.post("/api/notifications/retry", headers=self.headers,
+                                    json={"id": state["history"][0]["id"]})
+        self.assertEqual(409, response.status_code)
+
+    def test_retry_uses_only_in_memory_job(self):
+        with mock.patch("util.read_config._config_manager._config_cache",
+                        {"sendMessage": {"send_telegram_enable": True}}):
+            state = self.client.get("/api/notifications", headers=self.headers).json()
+            response = self.client.post("/api/notifications/retry", headers=self.headers,
+                                        json={"id": state["history"][0]["id"]})
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(409, self.client.post("/api/notifications/retry", headers=self.headers,
+                                                   json={"id": "missing"}).status_code)
+
+
 class RegistryLockTests(unittest.TestCase):
     def test_run_returns_already_running_when_locked(self):
         import asyncio

@@ -219,6 +219,34 @@ config 的 `crawler.sources.<source>.challenge.flaresolverr_url` 填
 
 脚本用途见 [scripts/README.md](scripts/README.md)。
 
+## Telegram 内存队列
+
+采集端仅构造通知任务并写入当前进程的内存队列；单独的 `telegram-sender` 线程
+负责格式化、下载防盗链图片和调用 Telegram。MongoDB 只保存原有采集数据，
+不新增通知 collection、事务、租约或投递状态。
+
+- sehuatang 保存完成后入队资源通知及板块汇总；x1080x 每批成功保存后立即入队，
+  与后续采集并行。仍只通知增量新资源，dry-run、补抓、失败恢复不新增通知。
+- Bot 按需在发送线程初始化。关闭通知时无需有效 Token，导入爬虫不加载 Telegram。
+- FIFO 顺序发送，默认每次请求间隔一秒。发送失败最多尝试五次；网络错误指数退避，
+  Telegram 429 尊重 `retry_after`，等待期间后续通知也保持排队。
+- 已成功的图片/文本分组记录内存进度，重试只从未完成的分组继续；单张图片使用
+  `send_photo`，无图通知发送文本，长说明拆为独立文本消息。
+- 队列默认最多等待 1000 条任务。容量用完或关闭时立即拒绝新任务，记录“未入队”数量，
+  不阻塞采集；这些通知不会自动补回。可以在 `sendMessage.queue.capacity` 调整容量。
+- 管理页「通知队列」显示等待、发送中、退避和最近结果；最近 100 条结果保存在内存，
+  其中失败任务可重新入队。累计发送、失败和拒绝数都只统计本次进程。
+- 普通单次 CLI 会在结束前等待队列处理完毕；常驻服务停止/重启时默认最多等待
+  30 秒收尾，Compose 给进程 45 秒退出时间。当前网络请求可能等待自身超时。
+
+这是进程内存队列：强制退出、崩溃或重启会丢失尚未完成的通知和失败记录。
+资源已经保存时，下次增量采集不会自动重新通知这些资源。每个进程拥有自己的队列，
+应沿用当前单进程运行方式，不额外启动独立通知容器，也不使用多个 Web worker。
+Telegram 已接收但客户端超时的请求，重试仍可能重复；内存进度不能消除这个窗口。
+
+可配置项见示例 `sendMessage.queue`：`capacity`、`max_attempts`、
+`min_interval_seconds`、`shutdown_timeout_seconds`。保存配置后重启生效。
+
 ## 失败恢复与管理页
 
 `crawler.retry_failed.max_failures` 默认 **5**，表示一条失败台账本轮累计失败的上限，

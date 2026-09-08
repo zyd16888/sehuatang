@@ -9,6 +9,7 @@ import sys
 import time
 import signal
 import argparse
+import threading
 import datetime
 from pathlib import Path
 
@@ -25,6 +26,9 @@ class ApplicationRunner:
     def __init__(self):
         self.scheduler_manager = None
         self.running = False
+        self._stopped = False
+        self._interrupted = False
+        self._stop_event = threading.Event()
 
         # 注册信号处理器
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -33,6 +37,7 @@ class ApplicationRunner:
     def _signal_handler(self, signum, frame):
         """信号处理器"""
         log.info(f"接收到信号 {signum}，正在优雅关闭...")
+        self._interrupted = True
         self.stop()
 
     def run_once(self, dry_run=False):
@@ -78,7 +83,8 @@ class ApplicationRunner:
 
             # 主循环
             while self.running:
-                time.sleep(60)  # 每分钟检查一次
+                if self._stop_event.wait(60):
+                    break
 
                 if self.running:  # 再次检查，避免在sleep期间被停止
                     log.debug("调度器正常运行中...")
@@ -224,14 +230,20 @@ class ApplicationRunner:
             ExceptionHandler.handle_and_log(e, "执行来源抓取任务时出错")
             return False
 
-    def stop(self):
-        """停止应用程序"""
+    def stop(self, drain_notifications=False):
+        """停止生产任务，再让发送线程收尾。"""
+        if self._stopped:
+            return
+        self._stopped = True
         log.info("正在停止应用程序...")
         self.running = False
+        self._stop_event.set()
 
         if self.scheduler_manager:
             self.scheduler_manager.stop()
 
+        from notifications.memory_queue import shutdown_notifications
+        shutdown_notifications(drain=drain_notifications and not self._interrupted)
         log.info("应用程序已停止")
 
     def health_check(self):
@@ -446,6 +458,9 @@ def main():
     except Exception as e:
         ExceptionHandler.handle_and_log(e, "程序运行时发生未处理的异常")
         sys.exit(1)
+    finally:
+        finite = bool(args.action) or args.mode in {"once", "javbee", "backfill"}
+        runner.stop(drain_notifications=finite)
 
 
 if __name__ == "__main__":

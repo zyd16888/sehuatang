@@ -429,7 +429,7 @@ class X1080XNotificationTests(unittest.TestCase):
         self.addCleanup(self._restore, module)
 
         class FakeNotifier:
-            def send_x1080x_notifications(self, data_list):
+            def enqueue_x1080x_notifications(self, data_list):
                 notified.extend(data_list)
                 return True
 

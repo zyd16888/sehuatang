@@ -183,5 +183,15 @@ async def backfill(
     return success
 
 
+def _run_standalone():
+    from notifications.memory_queue import shutdown_notifications
+    completed = False
+    try:
+        asyncio.run(main())
+        completed = True
+    finally:
+        shutdown_notifications(drain=completed)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    _run_standalone()

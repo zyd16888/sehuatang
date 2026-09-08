@@ -94,7 +94,9 @@ def _iso_utc(value):
 
 
 def _restart_process() -> None:
-    log.info("管理页触发重启，进程即将重新执行")
+    log.info("管理页触发重启，等待通知队列收尾后重新执行")
+    from notifications.memory_queue import shutdown_notifications
+    shutdown_notifications()
     try:
         os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as exc:
@@ -205,6 +207,21 @@ def create_app(
             "active_tasks": source_registry.active_tasks(),
             "server_time": datetime.now(timezone.utc).isoformat(),
         }
+
+    @app.get("/api/notifications", dependencies=[Depends(require_auth)])
+    def notification_status():
+        from notifications.memory_queue import get_notification_queue
+        return {"enabled": bool(get_config("sendMessage.send_telegram_enable", False)),
+                **get_notification_queue().snapshot()}
+
+    @app.post("/api/notifications/retry", dependencies=[Depends(require_auth)])
+    def retry_notification(payload: dict):
+        from notifications.memory_queue import get_notification_queue
+        if not get_config("sendMessage.send_telegram_enable", False):
+            raise HTTPException(status_code=409, detail="Telegram 通知未启用")
+        if not get_notification_queue().retry(str(payload.get("id") or "")):
+            raise HTTPException(status_code=409, detail="任务已不在失败记录中，或队列已满/关闭")
+        return {"ok": True}
 
     @app.get("/api/runs", dependencies=[Depends(require_auth)])
     def runs(source: Optional[str] = None, limit: int = 20):

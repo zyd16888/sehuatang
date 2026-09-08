@@ -24,6 +24,7 @@ def main():
         "tests.recovery_tests", "tests.crawler_core_tests", "tests.sehuatang_source_tests",
         "tests.x1080x_tests", "tests.web_app_tests", "tests.page_backfill_tests",
         "tests.javbee_tests", "tests.backfill_tests", "tests.mongo_recovery_tests",
+        "tests.notification_tests",
     ]
     try:
         suite = unittest.defaultTestLoader.loadTestsFromNames(names)

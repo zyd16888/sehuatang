@@ -5,6 +5,7 @@ services:
     image: cxsz16888/sehuatang:v2
     container_name: sehuatang-crawler
     restart: unless-stopped
+    stop_grace_period: 45s
 
     # 环境变量
     environment:

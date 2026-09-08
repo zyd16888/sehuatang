@@ -87,7 +87,8 @@ class WebScraper:
 
             if self.dry_run:
                 return f"dry-run：发现 {len(filtered_data)} 条新数据"
-            return self.notification_manager.send_notifications(filtered_data, fid)
+            queued = self.notification_manager.enqueue_notifications(filtered_data, fid)
+            return f"采集完成，新增 {len(filtered_data)} 条；通知入队 {queued['queued']}，未入队 {queued['rejected']}"
         except Exception as e:
             self.log.error(f"爬取板块 {fid} 时出错: {e}")
             return f"爬取失败: {str(e)}"

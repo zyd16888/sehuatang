@@ -135,6 +135,13 @@ sendMessage:
   tg_bot_token: "your_bot_token"
   tg_chat_id: "your_chat_id"
   image_proxy_url: "https://your-image-proxy.com"
+  # 进程内存队列：服务重启后清空，不写 MongoDB。
+  queue:
+    capacity: 1000             # 最多等待的通知任务数；满时记录拒绝数量，不阻塞采集
+    max_attempts: 5            # 每轮发送最多尝试次数，包含首次
+    min_interval_seconds: 1   # Telegram 请求之间的间隔
+    shutdown_timeout_seconds: 30 # 服务停止/重启时最多等待；正常单次 CLI 等待全部处理
+
 
 # Web 管理页（--mode web）
 web:
