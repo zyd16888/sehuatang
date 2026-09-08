@@ -214,6 +214,20 @@ class LogsEndpointTests(unittest.TestCase):
         ).json()
         self.assertEqual(["boom"], data["lines"])
 
+    def test_module_and_level_filters_are_combined(self):
+        from tests.log_filter_tests import entry
+        (self.logs_dir / "crawler.log").write_text(
+            entry(1, module="x1080x", level="ERROR") + entry(2, module="telegram", level="ERROR")
+            + entry(3, module="x1080x", level="INFO"), encoding="utf-8")
+        response = self.client.get("/api/logs?module=x1080x&level=ERROR", headers=self.headers)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual([entry(1, level="ERROR").strip()], response.json()["lines"])
+        self.assertEqual(1, response.json()["matched_count"])
+
+    def test_invalid_module_and_level_are_rejected(self):
+        for query in ("module=unknown", "level=unknown"):
+            self.assertEqual(400, self.client.get(f"/api/logs?{query}", headers=self.headers).status_code)
+
 
 class FailureLifecycleApiTests(unittest.TestCase):
     def setUp(self):

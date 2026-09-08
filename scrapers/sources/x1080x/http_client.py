@@ -51,6 +51,7 @@ class X1080XHttpClient:
         self._flaresolverr = (
             FlareSolverrClient(
                 flaresolverr_url,
+                source="x1080x",
                 proxy_url=settings.proxy.url if settings.proxy.enabled else None,
                 raise_on_rate_limit=True,
             )

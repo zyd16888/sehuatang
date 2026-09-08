@@ -39,6 +39,7 @@ class CrawlEngine:
         run_id: Optional[str] = None,
         batch_size: int = 20,
     ) -> RunSummary:
+        logger = log.bind(module=source.name)
         context = CrawlContext(
             source=source.name,
             run_id=run_id or uuid.uuid4().hex,
@@ -77,7 +78,7 @@ class CrawlEngine:
                 break
 
         summary.elapsed_ms = int((time.monotonic() - started) * 1000)
-        log.info(
+        logger.info(
             "来源抓取结束: "
             f"run_id={context.run_id} source={source.name} status={summary.status.value} "
             f"discovered={summary.discovered} requested={summary.requested} "
@@ -96,6 +97,7 @@ class CrawlEngine:
         summary: RunSummary,
     ) -> None:
         """抓取、解析并保存一批目标，累加进汇总。"""
+        logger = log.bind(module=source.name)
         fetch_results = self.http.fetch_many(
             [target.url for target in targets],
             stage="detail",
@@ -123,7 +125,7 @@ class CrawlEngine:
                         metadata=target.metadata,
                     )
                 )
-                log.warning(
+                logger.warning(
                     "详情请求终态失败: "
                     f"run_id={context.run_id} source={source.name} stage=detail "
                     f"target={target.key} attempts={result.attempts} "
@@ -136,7 +138,7 @@ class CrawlEngine:
             except Exception as exc:
                 error_type = (exc.reason if isinstance(exc, DetailValidationError)
                               else type(exc).__name__.lower())
-                log.warning(
+                logger.warning(
                     "详情解析异常: "
                     f"run_id={context.run_id} source={source.name} "
                     f"target={target.key} error_type={error_type}"
@@ -155,7 +157,7 @@ class CrawlEngine:
                 )
                 continue
             if record is None:
-                log.warning(
+                logger.warning(
                     "详情文档校验失败: "
                     f"run_id={context.run_id} source={source.name} "
                     f"target={target.key}"
@@ -186,7 +188,7 @@ class CrawlEngine:
             try:
                 self.failure_store.record(failures)
             except Exception as exc:
-                log.error(
+                logger.error(
                     "失败台账写入失败: "
                     f"run_id={context.run_id} source={source.name} error={exc}"
                 )
@@ -197,7 +199,7 @@ class CrawlEngine:
                     [record.target.key for record in records],
                 )
             except Exception as exc:
-                log.error(
+                logger.error(
                     "失败台账清理失败: "
                     f"run_id={context.run_id} source={source.name} error={exc}"
                 )

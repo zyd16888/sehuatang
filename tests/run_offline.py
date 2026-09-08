@@ -25,6 +25,7 @@ def main():
         "tests.x1080x_tests", "tests.web_app_tests", "tests.page_backfill_tests",
         "tests.x1080x_rate_limit_tests",
         "tests.x1080x_code_tests",
+        "tests.log_filter_tests",
         "tests.javbee_tests", "tests.backfill_tests", "tests.mongo_recovery_tests",
         "tests.notification_tests",
         "tests.sehuatang_run_tests",

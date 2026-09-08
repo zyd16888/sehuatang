@@ -626,6 +626,9 @@
         font: 12px/1.8 var(--mono);
         white-space: pre;
       }
+      #logBox.empty-log {
+        white-space: pre-wrap;
+      }
       textarea {
         width: 100%;
         min-height: 410px;
@@ -1124,11 +1127,29 @@
             </div>
           </div>
           <div class="log-tools">
-            <select id="logFile" aria-label="日志文件">
+            <label for="logFile">文件<select id="logFile">
               <option value="crawler">crawler.log</option>
-              <option value="error">error.log</option></select
-            ><label
-              >行数<input
+              <option value="error">error.log</option></select></label>
+            <label for="logLevel">级别<select id="logLevel">
+              <option value="">全部级别</option>
+              <option value="DEBUG">DEBUG · 调试</option>
+              <option value="INFO">INFO · 普通</option>
+              <option value="WARNING">WARNING · 警告</option>
+              <option value="ERROR">ERROR · 错误</option>
+              <option value="CRITICAL">CRITICAL · 严重错误</option>
+            </select></label>
+            <label for="logModule">模块<select id="logModule">
+              <option value="">全部模块</option>
+              <option value="sehuatang">Sehuatang</option>
+              <option value="javbee">JavBee</option>
+              <option value="x1080x">x1080x</option>
+              <option value="telegram">Telegram</option>
+              <option value="scheduler">调度</option>
+              <option value="database">数据库与存储</option>
+              <option value="system">系统</option>
+              <option value="unclassified">未分类（历史日志）</option>
+            </select></label>
+            <label for="logLines">条数<input
                 type="number"
                 id="logLines"
                 value="200"
@@ -1138,6 +1159,7 @@
               ><input type="checkbox" id="logAuto" checked />自动刷新</label
             >
           </div>
+          <p id="logHint" class="hint" role="status" aria-live="polite">按所选条件显示最近的日志，异常堆栈随原记录展示。</p>
           <pre id="logBox" tabindex="0" aria-label="日志内容">加载中…</pre>
         </section>
         <section
@@ -1473,18 +1495,28 @@
             .join("") ||
           '<tr><td class="empty" colspan="2">该来源暂无检查点。</td></tr>';
       }
-      async function refreshLogs() {
+      let logRefreshSequence = 0;
+      async function refreshLogs(resetScroll = false) {
+        const sequence = ++logRefreshSequence;
         const count = Math.max(
           10,
           Math.min(1000, Number($("logLines").value) || 200),
         );
-        const data = await api(
-          `/api/logs?file=${$("logFile").value}&lines=${count}`,
-        );
+        const params = new URLSearchParams({
+          file: $("logFile").value, lines: String(count),
+          level: $("logLevel").value, module: $("logModule").value,
+        });
+        const data = await api(`/api/logs?${params}`);
+        if (sequence !== logRefreshSequence) return;
         const box = $("logBox"),
-          stick = box.scrollHeight - box.scrollTop - box.clientHeight < 25;
-        box.textContent = (data.lines || []).join("\n") || "（日志为空）";
-        if (stick) box.scrollTop = box.scrollHeight;
+          scrollTop = box.scrollTop,
+          stick = resetScroll || box.scrollHeight - box.scrollTop - box.clientHeight < 25;
+        box.textContent = (data.lines || []).join("\n") || "当前筛选下没有日志，可切换为全部级别或全部模块。";
+        box.classList.toggle("empty-log", !(data.lines || []).length);
+        box.scrollTop = stick ? box.scrollHeight : scrollTop;
+        $("logHint").textContent = `显示最近 ${data.matched_count || 0} 条匹配日志（最多 ${count} 条），异常堆栈随原记录展示。`
+          + (data.scan_limited ? " 已扫描到读取上限，更早的日志可能未包含在结果中。" : "")
+          + " 历史日志没有模块标记时归为未分类。";
       }
       async function loadConfig() {
         if (configDirty && !confirm("重新加载会覆盖尚未保存的编辑，是否继续？"))
@@ -1640,10 +1672,10 @@
         "failureSource",
         "failureState",
         "bfSource",
-        "logFile",
-        "logLines",
       ])
         $(id).onchange = () => refreshPanel().catch(report);
+      for (const id of ["logFile", "logLevel", "logModule", "logLines"])
+        $(id).onchange = () => refreshLogs(true).catch(report);
       document
         .querySelectorAll("[role=tab]")
         .forEach((el) => (el.onclick = () => switchTab(el.dataset.tab)));

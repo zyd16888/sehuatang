@@ -58,6 +58,7 @@ class CrawlerHttpClient:
     ):
         settings.validate()
         self.source = source
+        self.log = log.bind(module=source)
         self.settings = settings
         self._request_func = request_func or requests.get
         self._sleeper = sleeper
@@ -124,7 +125,7 @@ class CrawlerHttpClient:
                 break
 
             delay = max(self._retry_delay(attempt), retry_after)
-            log.warning(
+            self.log.warning(
                 "HTTP 请求将在退避后重试: "
                 f"source={self.source} stage={stage} "
                 f"attempt={attempt}/{self.settings.retry.attempts} "

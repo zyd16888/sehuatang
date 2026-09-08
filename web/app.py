@@ -282,31 +282,24 @@ def create_app(
         return {"path": str(store.path), "progress": store._read()}
 
     @app.get("/api/logs", dependencies=[Depends(require_auth)])
-    def tail_logs(file: str = "crawler", lines: int = 200):
-        from util.log_util import logs_dir
+    def tail_logs(file: str = "crawler", lines: int = 200, level: str = "", module: str = ""):
+        from util.log_util import logs_dir, LOG_MODULES
+        from util.log_reader import read_log_tail, LOG_LEVELS
 
         if file not in {"crawler", "error"}:
             raise HTTPException(status_code=400, detail=f"未知日志文件: {file}")
+        level = level.upper()
+        if level and level not in LOG_LEVELS:
+            raise HTTPException(status_code=400, detail="未知日志级别")
+        if module and module not in LOG_MODULES:
+            raise HTTPException(status_code=400, detail="未知日志模块")
         lines = max(1, min(1000, int(lines)))
         log_path = logs_dir / f"{file}.log"
-        if not log_path.exists():
-            return {"file": file, "lines": []}
         try:
-            # 只读尾部固定大小，避免大文件全量读入
-            max_bytes = lines * 512
-            with log_path.open("rb") as fh:
-                fh.seek(0, os.SEEK_END)
-                size = fh.tell()
-                fh.seek(max(0, size - max_bytes))
-                chunk = fh.read()
+            result = read_log_tail(log_path, lines, level=level, module=module)
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"读取日志失败: {exc}")
-        text = chunk.decode("utf-8", errors="replace")
-        rows = text.splitlines()
-        # 尾部截断读取时第一行可能不完整，丢弃
-        if size > max_bytes and rows:
-            rows = rows[1:]
-        return {"file": file, "lines": rows[-lines:]}
+        return {"file": file, "level": level, "module": module, **result}
 
     # ---------- 动作 ----------
 

@@ -18,6 +18,36 @@ DEFAULT_LOG_CONFIG = {
     "console_output": True,
 }
 
+LOG_MODULES = {
+    "sehuatang": "Sehuatang",
+    "javbee": "JavBee",
+    "x1080x": "x1080x",
+    "telegram": "Telegram",
+    "scheduler": "调度",
+    "database": "数据库与存储",
+    "system": "系统",
+    "unclassified": "未分类（历史日志）",
+}
+
+
+def module_for_logger(caller: str) -> str:
+    """按代码所属组件归类，不根据日志正文关键词猜测模块。"""
+    if caller.startswith("notifications.") or caller in {"util.sendTelegram", "scrapers.notification_manager"}:
+        return "telegram"
+    if caller == "util.mongo" or caller.startswith("scrapers.infrastructure."):
+        return "database"
+    if caller == "util.scheduler_manager":
+        return "scheduler"
+    for source in ("sehuatang", "javbee", "x1080x"):
+        if caller.startswith(f"scrapers.sources.{source}.") or caller in {
+            f"scrapers.{source}_scraper", f"scrapers.{source}_parser",
+        }:
+            return source
+    if caller in {"scrapers.web_scraper", "scrapers.page_parser", "scrapers.http_client",
+                  "scrapers.data_manager", "scrapers.data_processor"}:
+        return "sehuatang"
+    return "system"
+
 
 def get_log_config():
     try:
@@ -49,7 +79,8 @@ def _build_logger() -> logging.Logger:
     logger.setLevel(level)
     logger.propagate = False
     formatter = logging.Formatter(
-        "%(asctime)s - %(levelname)s - %(message)s"
+        "%(asctime)s - %(levelname)s - [module=%(component)s] %(message)s",
+        defaults={"component": "system"},
     )
 
     app_handler = RotatingFileHandler(
@@ -118,27 +149,35 @@ class TNLog:
         fields = " ".join(
             f"{key}={value}"
             for key, value in self._context.items()
-            if value is not None
+            if value is not None and key != "module"
         )
         return f"{text} {fields}" if fields else text
 
+    def _emit(self, level: int, message: Any, *, exc_info=False) -> None:
+        caller = sys._getframe(2).f_globals.get("__name__", "")
+        component = self._context.get("module") or module_for_logger(caller)
+        if component not in LOG_MODULES:
+            component = "system"
+        self._logger.log(level, self._message(message), extra={"component": component},
+                         exc_info=exc_info, stacklevel=3)
+
     def debug(self, message: Any) -> None:
-        self._logger.debug(self._message(message))
+        self._emit(logging.DEBUG, message)
 
     def info(self, message: Any) -> None:
-        self._logger.info(self._message(message))
+        self._emit(logging.INFO, message)
 
     def warning(self, message: Any) -> None:
-        self._logger.warning(self._message(message))
+        self._emit(logging.WARNING, message)
 
     def error(self, message: Any) -> None:
-        self._logger.error(self._message(message))
+        self._emit(logging.ERROR, message)
 
     def critical(self, message: Any) -> None:
-        self._logger.critical(self._message(message))
+        self._emit(logging.CRITICAL, message)
 
     def exception(self, message: Any) -> None:
-        self._logger.exception(self._message(message))
+        self._emit(logging.ERROR, message, exc_info=True)
 
 
 log = TNLog()

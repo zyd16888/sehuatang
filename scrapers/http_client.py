@@ -69,6 +69,7 @@ class HttpClient:
         self._flaresolverr = (
             FlareSolverrClient(
                 flaresolverr_url,
+                source="sehuatang",
                 proxy_url=(
                     self.settings.proxy.url
                     if self.settings.proxy.enabled

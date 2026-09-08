@@ -72,8 +72,10 @@ class FlareSolverrClient:
         max_timeout_ms: int = 120000,
         request_timeout: Optional[float] = None,
         raise_on_rate_limit: bool = False,
+        source: str = "system",
     ):
         self.endpoint = endpoint.strip().rstrip("/")
+        self.log = log.bind(module=source)
         self.proxy_url = proxy_url or None
         self.raise_on_rate_limit = raise_on_rate_limit
         self.max_timeout_ms = int(max_timeout_ms)
@@ -117,7 +119,7 @@ class FlareSolverrClient:
             )
             solution = (response.json() or {}).get("solution") or {}
         except Exception as exc:
-            log.error(f"FlareSolverr 请求失败: endpoint={self.endpoint} error={exc}")
+            self.log.error(f"FlareSolverr 请求失败: endpoint={self.endpoint} error={exc}")
             return None
 
         response_body = (solution.get("response") or "").encode("utf-8")
@@ -126,7 +128,7 @@ class FlareSolverrClient:
             raise SiteRateLimited("FlareSolverr 返回站点限流响应")
 
         if solution.get("status") != 200:
-            log.warning(
+            self.log.warning(
                 "FlareSolverr 返回异常: "
                 f"status={solution.get('status')} url={url}"
             )
@@ -138,7 +140,7 @@ class FlareSolverrClient:
         html = _CHARSET_META_RE.sub('charset="utf-8"', html)
         body = html.encode("utf-8")
         if is_cf_challenge(body, 200):
-            log.warning(f"FlareSolverr 过盾后仍是挑战页: url={url}")
+            self.log.warning(f"FlareSolverr 过盾后仍是挑战页: url={url}")
             return None
         return body, list(solution.get("cookies") or []), solution.get("userAgent")
 
