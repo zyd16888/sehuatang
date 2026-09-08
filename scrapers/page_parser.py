@@ -4,9 +4,17 @@
 """
 import html
 import re
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 import bs4
 from util.log_util import log
+from scrapers.core.cf_challenge import is_cf_challenge, is_rate_limited
+
+
+@dataclass(frozen=True)
+class PlatePagination:
+    current_page: Optional[int] = None
+    last_page: Optional[int] = None
 
 
 class PageParser:
@@ -62,6 +70,66 @@ class PageParser:
             if strict:
                 raise
         return info_list
+
+    def parse_backfill_page(self, html_content: str) -> tuple[List[Dict[str, Any]], PlatePagination]:
+        """分页补抓校验完整列表，异常页不能被当作合法空页结束历史扫描。"""
+        raw = html_content.encode("utf-8") if isinstance(html_content, str) else html_content
+        if is_cf_challenge(raw, 200) or is_rate_limited(raw):
+            raise ValueError("响应为验证或访问受限页面")
+        soup = bs4.BeautifulSoup(html_content, "html.parser")
+        threads = soup.find_all(id=re.compile("^normalthread_"))
+        if not threads and soup.select_one("#messagetext, form#loginform"):
+            raise ValueError("响应为站点提示或登录页面")
+        records = self.parse_plate_page_all(html_content, strict=True)
+        if len(records) != len(threads):
+            raise ValueError("板块主题存在但字段解析不完整")
+        return records, self.parse_plate_pagination(html_content)
+
+    def parse_plate_pagination(self, html_content: str) -> PlatePagination:
+        """分页补抓只信任明确末页证据；邻近数字链接仅用于判断当前页是否已到末页。"""
+        soup = bs4.BeautifulSoup(html_content, "html.parser")
+        current_pages = set()
+        last_pages = set()
+        inferred_last_pages = set()
+        for pager in soup.select("div.pg"):
+            current = pager.select_one("strong")
+            current_number = None
+            if current and current.get_text(strip=True).isdigit():
+                current_number = int(current.get_text(strip=True))
+                current_pages.add(current_number)
+            linked_pages = []
+            has_next = bool(pager.select_one(".nxt, [rel~=next]"))
+            for anchor in pager.select("a[href]"):
+                match = re.search(r"(?:[?&]page=|forum-\d+-)(\d+)", anchor.get("href", ""))
+                number = int(match.group(1)) if match else None
+                if number:
+                    linked_pages.append(number)
+                label = anchor.get_text(" ", strip=True)
+                if re.search(r"下一[页頁]|next", label, re.I):
+                    has_next = True
+                if number and ("last" in anchor.get("class", [])
+                               or re.fullmatch(r"末[页頁]|尾[页頁]|最後一[页頁]|最后一页|last", label, re.I)):
+                    last_pages.add(number)
+            for hint in pager.select("[title], label span"):
+                text = f"{hint.get('title', '')} {hint.get_text(' ', strip=True)}"
+                match = re.search(r"(?:共\s*|/\s*)(\d+)\s*[页頁]", text)
+                if match:
+                    last_pages.add(int(match.group(1)))
+            # 没有下一页且所有可见页号均不大于当前页，才能确认已在最后一页。
+            if (current_number and not has_next and not pager.select_one("a.last")
+                    and all(n <= current_number for n in linked_pages)):
+                inferred_last_pages.add(current_number)
+        if not last_pages:
+            last_pages = inferred_last_pages
+        if len(current_pages) > 1 or len(last_pages) > 1:
+            raise ValueError("分页栏页码或总页数不一致")
+        current = next(iter(current_pages), None)
+        last = next(iter(last_pages), None)
+        if (current is not None and current < 1) or (last is not None and last < 1):
+            raise ValueError("分页栏页码无效")
+        if current and last and current > last:
+            raise ValueError("分页栏当前页超过末页")
+        return PlatePagination(current, last)
 
     def parse_last_page(self, html_content: str) -> int:
         """从 Discuz 分页栏提取最后一页页码。"""

@@ -6,6 +6,8 @@
   （失败由台账负责退避重试，页覆盖进度与失败恢复解耦）；
 - 检查点键为 source:partition，x1080x 的 partition 是 typeid，
   sehuatang 的 partition 是 fid。
+- Sehuatang 分页补抓在读取正常列表后核对明确末页、当前页与整页重复；
+  异常列表不推进检查点。已有越界检查点不会自动改写。
 """
 import json
 from pathlib import Path

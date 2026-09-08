@@ -239,7 +239,57 @@ def _plate_html(tids):
         """
         for i, tid in enumerate(tids)
     )
-    return f"<html><body><table>{rows}</table></body></html>"
+    return f'<html><body><div id="threadlist"><table id="threadlisttableid">{rows}</table></div></body></html>'
+
+
+def _pager(current, last=None, next_page=None):
+    links = f'<strong>{current}</strong>'
+    if last is not None:
+        links += f'<a class="last" href="forum.php?mod=forumdisplay&amp;fid=103&amp;page={last}">... {last}</a>'
+    if next_page is not None:
+        links += f'<a class="nxt" href="forum-103-{next_page}.html">下一页</a>'
+    if current > 1:
+        links += f'<a href="forum-103-{current - 1}.html">{current - 1}</a>'
+    return f'<div class="pg">{links}</div>'
+
+
+class SehuatangPaginationParserTests(unittest.TestCase):
+    def test_explicit_last_links_and_total_hints(self):
+        parser = PageParser()
+        for pager in (_pager(1, 50, 2),
+                      '<div class="pg"><strong>1</strong><a class="last" href="forum-103-50.html">...50</a></div>',
+                      '<div class="pg"><strong>1</strong><label><span title="共 50 页"> / 50 页</span></label></div>'):
+            result = parser.parse_plate_pagination(pager)
+            self.assertEqual((1, 50), (result.current_page, result.last_page))
+
+    def test_visible_neighbour_pages_are_not_a_total(self):
+        pager = '<div class="pg"><strong>1</strong><a href="forum-103-10.html">10</a><a class="nxt" href="forum-103-2.html">下一页</a></div>'
+        self.assertIsNone(PageParser().parse_plate_pagination(pager).last_page)
+        self.assertIsNone(PageParser().parse_plate_pagination(_plate_html(["1"])).last_page)
+
+    def test_current_page_without_forward_links_can_confirm_last(self):
+        self.assertEqual(50, PageParser().parse_plate_pagination(_pager(50)).last_page)
+        self.assertEqual(1, PageParser().parse_plate_pagination(_pager(1)).last_page)
+
+    def test_conflicting_pagination_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "不一致"):
+            PageParser().parse_plate_pagination(_pager(1, 50, 2) + _pager(1, 60, 2))
+
+    def test_strict_empty_list_requires_valid_structure(self):
+        parser = PageParser()
+        self.assertEqual([], parser.parse_backfill_page(_plate_html([]))[0])
+        for body in ('<html><body></body></html>',
+                     '<div id="threadlist"><div id="messagetext">抱歉，没有权限</div></div>',
+                     '<form id="loginform"></form><div id="threadlist"></div>',
+                     '<title>Just a moment</title><div id="threadlist"></div>',
+                     '<title>访问受限</title><div id="threadlist"></div>'):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                parser.parse_backfill_page(body)
+
+    def test_partial_thread_parse_failure_is_not_silently_dropped(self):
+        body = _plate_html(["100"]) + '<tbody id="normalthread_101"><tr><td>broken</td></tr></tbody>'
+        with self.assertRaisesRegex(ValueError, "字段解析不完整"):
+            PageParser().parse_backfill_page(body)
 
 
 class SehuatangBackfillPagesTests(unittest.TestCase):
@@ -262,7 +312,11 @@ class SehuatangBackfillPagesTests(unittest.TestCase):
         scraper.failure_store = NullFailureStore()
 
         class FakeInnerHttp:
+            def __init__(self):
+                self.fetched = []
+
             def get_html(self, url):
+                self.fetched.append(url)
                 return page_bodies.get(url)
 
         scraper.http = FakeInnerHttp()
@@ -295,12 +349,149 @@ class SehuatangBackfillPagesTests(unittest.TestCase):
     def _url(self, fid, page):
         return WebScraper._build_plate_url(fid, page, ordered_by_dateline=True)
 
+    def _detail(self, tid):
+        return {"tid": tid, "post_time": "2020-05-01", "magnet": "magnet:?a"}
+
+    def test_stops_at_known_last_page_without_requesting_beyond_it(self):
+        scraper = self._scraper({
+            self._url(103, 1): _plate_html(["100"]) + _pager(1, 2, 2),
+            self._url(103, 2): _plate_html(["101"]) + _pager(2),
+        }, {tid: self._detail(tid) for tid in ("100", "101")})
+        result = asyncio.run(scraper.backfill_pages(103, 1, 2000, checkpoint_store=self.checkpoints))
+        self.assertEqual("last_page@2", result["stopped"])
+        self.assertEqual(2, result["saved"])
+        self.assertEqual(2, self.checkpoints.load("sehuatang", 103))
+        self.assertEqual([self._url(103, 1), self._url(103, 2)], scraper.http.fetched)
+
+    def test_resume_beyond_last_only_reads_first_page_and_preserves_old_checkpoint(self):
+        self.checkpoints.save("sehuatang", 103, 1000)
+        scraper = self._scraper({self._url(103, 1): _plate_html(["100"]) + _pager(1, 50, 2)}, {})
+        result = asyncio.run(scraper.backfill_pages(103, 1, 2000, resume=True, checkpoint_store=self.checkpoints))
+        self.assertEqual("last_page@50", result["stopped"])
+        self.assertEqual(0, result["failed"])
+        self.assertEqual(0, result["pages_scanned"])
+        self.assertEqual(1000, self.checkpoints.load("sehuatang", 103))
+        self.assertEqual([self._url(103, 1)], scraper.http.fetched)
+
+    def test_repeated_page_is_failure_without_advancing_checkpoint(self):
+        scraper = self._scraper({
+            self._url(103, 1): _plate_html(["100", "101"]),
+            self._url(103, 2): _plate_html(["101", "100"]),
+        }, {tid: self._detail(tid) for tid in ("100", "101")})
+        result = asyncio.run(scraper.backfill_pages(103, 1, 2000, checkpoint_store=self.checkpoints))
+        self.assertEqual("list_failed@2", result["stopped"])
+        self.assertIn("重复", result["error"])
+        self.assertEqual(1, result["failed"])
+        self.assertEqual(1, self.checkpoints.load("sehuatang", 103))
+        self.assertEqual(2, len(scraper.http.fetched))
+
+    def test_wrong_current_page_is_failure_even_when_threads_differ(self):
+        scraper = self._scraper({
+            self._url(103, 1): _plate_html(["100"]) + _pager(1, 5, 2),
+            self._url(103, 2): _plate_html(["101"]) + _pager(1, 5, 2),
+        }, {"100": self._detail("100")})
+        result = asyncio.run(scraper.backfill_pages(103, 1, 10, checkpoint_store=self.checkpoints))
+        self.assertEqual("list_failed@2", result["stopped"])
+        self.assertIn("页码错位", result["error"])
+        self.assertEqual(1, self.checkpoints.load("sehuatang", 103))
+
+    def test_actual_last_page_returned_for_out_of_range_request_is_not_processed_twice(self):
+        scraper = self._scraper({
+            self._url(103, 1): _plate_html(["100"]),
+            self._url(103, 2): _plate_html(["100"]) + _pager(1),
+        }, {"100": self._detail("100")})
+        result = asyncio.run(scraper.backfill_pages(103, 1, 10, checkpoint_store=self.checkpoints))
+        self.assertEqual("last_page@1", result["stopped"])
+        self.assertEqual(0, result["failed"])
+        self.assertEqual(1, result["saved"])
+        self.assertEqual(1, self.checkpoints.load("sehuatang", 103))
+
+    def test_existing_resources_and_partial_overlap_do_not_stop_pagination(self):
+        scraper = self._scraper({
+            self._url(103, 1): _plate_html(["100", "101"]),
+            self._url(103, 2): _plate_html(["101", "102"]),
+            self._url(103, 3): _plate_html([]),
+        }, {})
+        scraper.data_manager.compare_existing_data = lambda *args: ([], [])
+        result = asyncio.run(scraper.backfill_pages(103, 1, 10, checkpoint_store=self.checkpoints))
+        self.assertEqual("exhausted@3", result["stopped"])
+        self.assertEqual(2, result["pages_scanned"])
+        self.assertEqual(0, result["requested"])
+        self.assertEqual(2, self.checkpoints.load("sehuatang", 103))
+
+    def test_invalid_page_pauses_and_other_partition_can_continue(self):
+        scraper = self._scraper({
+            self._url(103, 1): '<html><div id="messagetext">没有权限</div></html>',
+            self._url(104, 1): _plate_html(["100"]) + _pager(1),
+        }, {"100": self._detail("100")})
+        first = asyncio.run(scraper.backfill_pages(103, 1, 1000, checkpoint_store=self.checkpoints))
+        second = asyncio.run(scraper.backfill_pages(104, 1, 1000, checkpoint_store=self.checkpoints))
+        self.assertEqual("list_failed@1", first["stopped"])
+        self.assertEqual("last_page@1", second["stopped"])
+        self.assertEqual(0, self.checkpoints.load("sehuatang", 103))
+        self.assertEqual(1, self.checkpoints.load("sehuatang", 104))
+
+    def test_empty_page_before_known_last_is_not_exhaustion(self):
+        scraper = self._scraper({
+            self._url(103, 1): _plate_html(["100"]) + _pager(1, 5, 2),
+            self._url(103, 2): _plate_html([]),
+        }, {"100": self._detail("100")})
+        result = asyncio.run(scraper.backfill_pages(103, 1, 10, checkpoint_store=self.checkpoints))
+        self.assertEqual("list_failed@2", result["stopped"])
+        self.assertIn("空列表", result["error"])
+        self.assertEqual(1, self.checkpoints.load("sehuatang", 103))
+
+    def test_dry_run_does_not_update_checkpoint(self):
+        scraper = self._scraper({self._url(103, 1): _plate_html(["100"]) + _pager(1)}, {})
+        scraper.dry_run = True
+        scraper.data_manager.compare_existing_data = lambda *args: ([], [])
+        result = asyncio.run(scraper.backfill_pages(103, 1, 10, checkpoint_store=self.checkpoints))
+        self.assertEqual("last_page@1", result["stopped"])
+        self.assertEqual(0, self.checkpoints.load("sehuatang", 103))
+
+    def test_neighbour_page_links_do_not_truncate_scan(self):
+        pages = {}
+        for page in range(1, 4):
+            pages[self._url(103, page)] = _plate_html([str(100 + page)]) + _pager(page, next_page=page + 1)
+        pages[self._url(103, 4)] = _plate_html([])
+        scraper = self._scraper(pages, {})
+        scraper.data_manager.compare_existing_data = lambda *args: ([], [])
+        result = asyncio.run(scraper.backfill_pages(103, 1, 10, checkpoint_store=self.checkpoints))
+        self.assertEqual("exhausted@4", result["stopped"])
+        self.assertEqual(3, result["pages_scanned"])
+
+    def test_finished_requested_range_does_not_issue_preflight(self):
+        self.checkpoints.save("sehuatang", 103, 1000)
+        scraper = self._scraper({}, {})
+        result = asyncio.run(scraper.backfill_pages(103, 1, 1000, resume=True, checkpoint_store=self.checkpoints))
+        self.assertEqual([], scraper.http.fetched)
+        self.assertEqual(0, result["failed"])
+
+    def test_main_continues_next_partition_after_reaching_short_partition_end(self):
+        from contextlib import nullcontext
+        from unittest.mock import patch
+        import main
+
+        scraper = self._scraper({
+            self._url(103, 1): _plate_html(["100"]) + _pager(1),
+            self._url(104, 1): _plate_html(["200"]) + _pager(1, 2, 2),
+            self._url(104, 2): _plate_html(["201"]) + _pager(2),
+        }, {})
+        scraper.data_manager.compare_existing_data = lambda *args: ([], [])
+        with patch.object(main, "WebScraper", return_value=nullcontext(scraper)), \
+                patch("scrapers.page_backfill.PageCheckpointStore", return_value=self.checkpoints):
+            result = asyncio.run(main._backfill_pages("sehuatang", 1, 2000, fids=[103, 104]))
+        self.assertTrue(result)
+        self.assertEqual([self._url(103, 1), self._url(104, 1), self._url(104, 2)], scraper.http.fetched)
+        self.assertEqual(1, self.checkpoints.load("sehuatang", 103))
+        self.assertEqual(2, self.checkpoints.load("sehuatang", 104))
+
     def test_backfills_range_without_date_filter_and_checkpoints(self):
         detail = {"tid": "100", "post_time": "2020-05-01 10:00", "magnet": "magnet:?a"}
         scraper = self._scraper(
             {
                 self._url(103, 1): _plate_html(["100"]),
-                self._url(103, 2): "<html><body></body></html>",
+                self._url(103, 2): _plate_html([]),
             },
             {"100": detail},
         )
@@ -322,7 +513,7 @@ class SehuatangBackfillPagesTests(unittest.TestCase):
         scraper = self._scraper(
             {
                 self._url(103, 1): _plate_html(["100", "101"]),
-                self._url(103, 2): "<html><body></body></html>",
+                self._url(103, 2): _plate_html([]),
             },
             # 101 详情失败
             {"100": {"tid": "100", "post_time": "2020-05-01", "magnet": "magnet:?a"}},
@@ -357,12 +548,12 @@ class SehuatangBackfillPagesTests(unittest.TestCase):
         self.assertEqual("list_failed@2", summary["stopped"])
         self.assertEqual(1, self.checkpoints.load("sehuatang", "103"))
 
-        # 续跑从第 3 页继续（第 2 页恢复后需要 --start-page 覆盖或表示已完成）
-        # 此处验证 resume 语义：从检查点 +1 开始
+        # 续跑先检查第一页的分页信息，再从未完成的第 2 页继续。
         scraper2 = self._scraper(
             {
+                self._url(103, 1): _plate_html(["100"]),
                 self._url(103, 2): _plate_html(["102"]),
-                self._url(103, 3): "<html><body></body></html>",
+                self._url(103, 3): _plate_html([]),
             },
             {"102": {"tid": "102", "post_time": "2020-05-02", "magnet": "magnet:?b"}},
         )

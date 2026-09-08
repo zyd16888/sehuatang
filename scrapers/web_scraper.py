@@ -318,26 +318,74 @@ class WebScraper:
             "saved": 0,
             "failed": 0,
             "stopped": "",
+            "last_page": None,
         }
 
-        for page in range(first_page, end_page + 1):
-            url = self._build_plate_url(fid, page, ordered_by_dateline=True)
-            body = self.http.get_html(url)
-            if not body:
-                summary["stopped"] = f"list_failed@{page}"
-                summary["failed"] += 1
-                self.log.warning(
-                    "板块补抓列表页失败，暂停（检查点未推进，可 --resume 继续）: "
-                    f"fid={fid} page={page}"
-                )
-                break
+        seen_pages = {}
 
-            info_list = self.page_parser.parse_plate_page_all(body)
+        def read_page(page):
+            body = self.http.get_html(self._build_plate_url(fid, page, ordered_by_dateline=True))
+            if not body:
+                raise ValueError("列表请求失败或验证未通过")
+            return self.page_parser.parse_backfill_page(body)
+
+        def stop_failed(page, reason):
+            summary["stopped"] = f"list_failed@{page}"
+            summary["failed"] += 1
+            summary["error"] = reason
+            self.log.warning(f"板块补抓列表异常，暂停（检查点未推进，可 --resume 继续）: "
+                             f"fid={fid} page={page} reason={reason}")
+
+        # 续跑/指定深分页时先读取第一页，避免旧检查点已越过真实末页而持续空转。
+        if 1 < first_page <= end_page:
+            try:
+                first_records, pagination = read_page(1)
+                if pagination.current_page not in (None, 1):
+                    raise ValueError(f"第一页响应页码错位: actual={pagination.current_page}")
+                summary["last_page"] = pagination.last_page
+                if first_records:
+                    seen_pages[frozenset(str(row["tid"]) for row in first_records)] = 1
+                elif pagination.last_page is None or pagination.last_page == 1:
+                    summary["stopped"] = "exhausted@1"
+                else:
+                    raise ValueError("第一页为空，但分页栏显示还有后续页")
+            except Exception as exc:
+                stop_failed(1, str(exc))
+
+        for page in range(first_page, end_page + 1):
+            if summary["stopped"]:
+                break
+            if summary["last_page"] is not None and page > summary["last_page"]:
+                summary["stopped"] = f"last_page@{summary['last_page']}"
+                self.log.info(f"板块 {fid} 已达实际末页 {summary['last_page']}，不再请求第 {page} 页")
+                break
+            try:
+                info_list, pagination = read_page(page)
+            except Exception as exc:
+                stop_failed(page, str(exc))
+                break
+            if pagination.last_page is not None:
+                summary["last_page"] = pagination.last_page
+            if summary["last_page"] is not None and page > summary["last_page"]:
+                summary["stopped"] = f"last_page@{summary['last_page']}"
+                self.log.info(f"板块 {fid} 请求页 {page} 已越界，实际末页 {summary['last_page']}")
+                break
+            if pagination.current_page not in (None, page):
+                stop_failed(page, f"响应页码错位: requested={page} actual={pagination.current_page}")
+                break
             if not info_list:
+                if summary["last_page"] is not None and page < summary["last_page"]:
+                    stop_failed(page, f"末页前出现空列表: last_page={summary['last_page']}")
+                    break
                 summary["stopped"] = f"exhausted@{page}"
                 self.log.info(f"板块 {fid} 第 {page} 页无主题，视为到底")
                 break
 
+            signature = frozenset(str(info["tid"]) for info in info_list)
+            if signature in seen_pages:
+                stop_failed(page, f"整页主题重复: previous_page={seen_pages[signature]}")
+                break
+            seen_pages[signature] = page
             for info in info_list:
                 info["fid"] = fid
             tid_list = [str(info["tid"]) for info in info_list]
@@ -373,6 +421,10 @@ class WebScraper:
                 f"板块 {fid} 分页补抓进度: 第 {page} 页，"
                 f"发现 {len(tid_list)} 条，新增请求 {len(new_tid_list)} 条"
             )
+            if summary["last_page"] is not None and page >= summary["last_page"]:
+                summary["stopped"] = f"last_page@{summary['last_page']}"
+                self.log.info(f"板块 {fid} 实际末页 {page} 已处理完成，切换下一分区")
+                break
 
         self.log.info(
             "板块分页补抓结束: "
