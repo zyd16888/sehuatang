@@ -23,6 +23,7 @@ def main():
     names = sys.argv[1:] or [
         "tests.recovery_tests", "tests.crawler_core_tests", "tests.sehuatang_source_tests",
         "tests.x1080x_tests", "tests.web_app_tests", "tests.page_backfill_tests",
+        "tests.x1080x_rate_limit_tests",
         "tests.javbee_tests", "tests.backfill_tests", "tests.mongo_recovery_tests",
         "tests.notification_tests",
         "tests.sehuatang_run_tests",

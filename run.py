@@ -239,6 +239,9 @@ class ApplicationRunner:
         self.running = False
         self._stop_event.set()
 
+        from scrapers.sources.x1080x.http_client import stop_shared_clients
+        stop_shared_clients()
+
         if self.scheduler_manager:
             self.scheduler_manager.stop()
 

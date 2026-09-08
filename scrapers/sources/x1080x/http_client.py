@@ -20,12 +20,14 @@ from scrapers.core.cf_challenge import (
     CF_STATUS,
     FlareSolverrClient,
     is_cf_challenge,
+    is_rate_limited,
     merge_solution_cookies,
 )
 from scrapers.core.config import HttpSettings
 from scrapers.core.http import CrawlerHttpClient, redact_url
 from scrapers.core.models import FetchResult
 from util.log_util import log
+from .rate_limit import RateLimitSettings, RequestGate, SiteRateLimited
 
 
 class X1080XHttpClient:
@@ -36,8 +38,10 @@ class X1080XHttpClient:
         settings: HttpSettings,
         flaresolverr_url: str = "",
         transport: Optional[CrawlerHttpClient] = None,
+        rate_settings: Optional[RateLimitSettings] = None,
     ):
         self.settings = settings
+        self.gate = RequestGate(rate_settings or RateLimitSettings())
         self._cookie: dict = {}
         self._cookie_lock = threading.Lock()
         self._solve_lock = threading.Lock()
@@ -48,6 +52,7 @@ class X1080XHttpClient:
             FlareSolverrClient(
                 flaresolverr_url,
                 proxy_url=settings.proxy.url if settings.proxy.enabled else None,
+                raise_on_rate_limit=True,
             )
             if flaresolverr_url
             else None
@@ -70,14 +75,42 @@ class X1080XHttpClient:
     # ---------- 引擎合同 ----------
 
     def fetch(self, url: str, stage: str = "detail") -> FetchResult:
+        try:
+            self.gate.check()
+            result = self._fetch_once(url, stage)
+        except SiteRateLimited:
+            return FetchResult(url, None, 429, 0, 0,
+                               error_type="rate_limited", error_message="站点正在冷却")
+        if (is_rate_limited(result.body) or result.error_type == "siteratelimited"
+                or (result.status_code == 429 and not is_cf_challenge(result.body, 200))):
+            self.gate.limit()
+            return replace(result, status_code=429, error_type="rate_limited",
+                           error_message="站点请求过于频繁，等待冷却后恢复")
+        if result.ok:
+            self.gate.success()
+        return result
+
+    def wait_for_retry(self):
+        self.gate.wait_for_retry()
+
+    def _fetch_once(self, url: str, stage: str) -> FetchResult:
         started = time.monotonic()
         version = self._cookie_version
         result = self._transport.fetch(url, stage)
+        if (is_rate_limited(result.body) or result.error_type == "siteratelimited"
+                or (result.status_code == 429 and not is_cf_challenge(result.body, 200))):
+            return result
         if not is_cf_challenge(result.body, result.status_code):
             return result
 
         log.info(f"触发 CF 挑战: stage={stage} url={redact_url(url)}")
-        body, extra_attempts = self._resolve_challenge(url, version)
+        try:
+            body, extra_attempts = self._resolve_challenge(url, version)
+        except SiteRateLimited as exc:
+            return FetchResult(url, None, 429,
+                               result.attempts + getattr(exc, "attempts", 0),
+                               int((time.monotonic() - started) * 1000),
+                               error_type="rate_limited", error_message="站点请求过于频繁")
         if body is not None:
             return FetchResult(
                 url=url,
@@ -130,6 +163,8 @@ class X1080XHttpClient:
     # ---------- 内部 ----------
 
     def _request_with_cookies(self, url: str, **kwargs):
+        # 每次真实请求（包括 transport 内部重试）都经过同一个来源闸门。
+        self.gate.acquire()
         headers = dict(kwargs.pop("headers", {}) or {})
         with self._cookie_lock:
             headers["User-Agent"] = self._user_agent
@@ -139,6 +174,9 @@ class X1080XHttpClient:
         session = self._local.session
         session.cookies.clear()
         response = session.get(url, cookies=cookies, headers=headers, **kwargs)
+        if (is_rate_limited(response.content)
+                or (response.status_code == 429 and not is_cf_challenge(response.content, 200))):
+            self.gate.limit(CrawlerHttpClient._retry_after(response))
         with self._cookie_lock:
             self._cookie.update({key: value for key, value in response.cookies.get_dict().items()
                                  if key != "cf_clearance"})
@@ -152,9 +190,14 @@ class X1080XHttpClient:
         """仅当等待期间验证状态更新，才尝试复用；省掉必然失败的重复直连。"""
         attempts = 0
         with self._solve_lock:
+            self.gate.check()
             if version != self._cookie_version:
                 retry = self._transport.fetch(url, stage="cf_retry")
                 attempts += retry.attempts
+                if (is_rate_limited(retry.body) or retry.error_type == "siteratelimited"
+                        or (retry.status_code == 429 and not is_cf_challenge(retry.body, 200))):
+                    self.gate.limit()
+                    raise SiteRateLimited()
                 if retry.ok and not is_cf_challenge(retry.body, retry.status_code):
                     return retry.body, attempts
             body = self._bypass(url)
@@ -174,17 +217,25 @@ class X1080XHttpClient:
             log.warning("未配置 flaresolverr_url，无法自动过 CF")
             return None
         started = time.monotonic()
-        solution = self._flaresolverr.solve(url, cookies=self._cookie_copy())
+        self.gate.acquire()
+        try:
+            solution = self._flaresolverr.solve(url, cookies=self._cookie_copy())
+        except SiteRateLimited as exc:
+            self.gate.limit()
+            exc.attempts = 1
+            raise
         if solution is None:
             return None
         body, cookies, user_agent = solution
+        if is_rate_limited(body):
+            self.gate.limit()
         with self._cookie_lock:
             merge_solution_cookies(self._cookie, cookies)
             if user_agent:
                 self._user_agent = user_agent
             self._cookie_version += 1
         log.info(
-            "CF 过盾成功: "
+            "CF 挑战处理完成: "
             f"url={redact_url(url)} cookies={len(cookies)} "
             f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
         )
@@ -196,17 +247,26 @@ _CLIENTS = OrderedDict()
 _CLIENTS_LOCK = threading.Lock()
 
 
-def shared_http_client(settings, endpoint, base_url):
-    key = (settings, endpoint, urlsplit(base_url).netloc.lower())
+def shared_http_client(settings, endpoint, base_url, rate_settings=None):
+    key = (settings, endpoint, urlsplit(base_url).netloc.lower(), rate_settings)
     now = time.monotonic()
     with _CLIENTS_LOCK:
         cached = _CLIENTS.get(key)
         if cached and now - cached[0] < 3600:
             _CLIENTS.move_to_end(key)
             return cached[1]
-        client = X1080XHttpClient(settings, flaresolverr_url=endpoint)
+        client = X1080XHttpClient(settings, flaresolverr_url=endpoint,
+                                 rate_settings=rate_settings)
         _CLIENTS[key] = (now, client)
         _CLIENTS.move_to_end(key)
         while len(_CLIENTS) > 8:
             _CLIENTS.popitem(last=False)
         return client
+
+
+def stop_shared_clients():
+    """服务退出时唤醒冷却等待，保留未完成页检查点供 --resume 恢复。"""
+    with _CLIENTS_LOCK:
+        for _, client in _CLIENTS.values():
+            client.gate.stop_event.set()
+        _CLIENTS.clear()

@@ -2,7 +2,6 @@
 import os
 from typing import Dict, Optional
 
-from scrapers.core.cf_challenge import is_rate_limited
 from scrapers.core.config import load_source_settings
 from scrapers.core.contracts import CrawlTarget
 from scrapers.core.engine import CrawlEngine
@@ -11,6 +10,7 @@ from scrapers.infrastructure import build_failure_store
 from scrapers.page_backfill import FixedTargetSource, PageCheckpointStore
 from scrapers.sources.x1080x import X1080XRepository, X1080XSource
 from scrapers.sources.x1080x.http_client import shared_http_client
+from scrapers.sources.x1080x.rate_limit import BackfillHttpClient, RateLimitSettings
 from util.log_util import log
 from util.mongo import find_existing_x1080x_keys, save_x1080x_items
 from util.read_config import get_config
@@ -41,6 +41,7 @@ class X1080XScraper:
             self.settings,
             _resolve_flaresolverr_url(self.config),
             self.config.get("base_url", ""),
+            RateLimitSettings.from_config(self.config),
         )
         self.failure_store = failure_store or build_failure_store(
             mongodb_enabled=bool(get_config("mongodb.enable", False))
@@ -52,7 +53,7 @@ class X1080XScraper:
         dry_run: bool = False,
         retry_failed: bool = False,
     ) -> Dict[str, object]:
-        source = X1080XSource(self.config)
+        source = X1080XSource(self.config, diagnostics=not dry_run)
         notify = (not dry_run and not retry_failed and not self.config.get("refresh_all", False)
                   and bool(self.config.get("notify_telegram", True)))
         repository = X1080XRepository(
@@ -101,12 +102,13 @@ class X1080XScraper:
         检查点按完整处理完的页推进；详情失败进失败台账、
         由 retry-failed 恢复，不阻塞页进度。
         """
-        source = X1080XSource(self.config)
+        source = X1080XSource(self.config, diagnostics=not dry_run)
         repository = X1080XRepository(
             existing_lookup=find_existing_x1080x_keys,
             save_func=save_x1080x_items,
         )
-        engine = CrawlEngine(self.http, self.failure_store)
+        http = BackfillHttpClient(self.http)
+        engine = CrawlEngine(http, self.failure_store)
         checkpoints = checkpoint_store or PageCheckpointStore()
 
         selected = {
@@ -148,10 +150,9 @@ class X1080XScraper:
                 "stopped": "",
             }
             summary["partitions"][typeid] = partition_summary
-            rate_limited = False
 
             for page in range(first_page, end_page + 1):
-                result = self.http.fetch(source.list_url(typeid, page), stage="list")
+                result = http.fetch(source.list_url(typeid, page), stage="list")
                 if not result.ok:
                     partition_summary["stopped"] = f"list_failed@{page}"
                     summary["failed"] += 1
@@ -161,22 +162,13 @@ class X1080XScraper:
                     )
                     break
 
-                if is_rate_limited(result.body):
-                    partition_summary["stopped"] = f"rate_limited@{page}"
-                    log.error(
-                        "x1080x 补抓命中站点限流（请求过于频繁），中止全部剩余分类"
-                        f"（检查点未推进，可稍后 --resume 继续）: typeid={typeid} page={page}"
-                    )
-                    rate_limited = True
-                    break
-
                 tids = source.parser.parse_list(result.body)
                 if not tids and page == first_page:
                     # 与增量 discover 一致：首个页面 0 条先重试一次再定论。
                     log.warning(
                         f"x1080x 分类 {typeid} 第 {page} 页解析为 0 条，重试一次"
                     )
-                    retry_fetch = self.http.fetch(
+                    retry_fetch = http.fetch(
                         source.list_url(typeid, page), stage="list"
                     )
                     if retry_fetch.ok:
@@ -224,10 +216,6 @@ class X1080XScraper:
 
                 if not dry_run:
                     checkpoints.save("x1080x", typeid, page)
-
-            if rate_limited:
-                # 限流是全站级别，其余分类没有必要继续尝试
-                break
 
         log.info(
             "x1080x 分页补抓结束: "

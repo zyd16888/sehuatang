@@ -265,7 +265,11 @@ class X1080XSourceTests(unittest.TestCase):
             attempts=1,
             elapsed_ms=0,
         )
-        self.assertIsNone(source.parse_detail(target, result))
+        from scrapers.core.contracts import DetailValidationError
+        source.diagnostics = False
+        with self.assertRaises(DetailValidationError) as caught:
+            source.parse_detail(target, result)
+        self.assertEqual("missing_magnet", caught.exception.reason)
 
 
 class X1080XRepositoryTests(unittest.TestCase):

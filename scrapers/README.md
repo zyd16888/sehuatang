@@ -58,6 +58,50 @@ CRAWLER_SEHUATANG_FLARESOLVERR_URL
 
 ## 运行入口
 
+### x1080x 限流与历史补抓
+
+`crawler.sources.x1080x.rate_limit` 控制该来源的请求频率：
+
+```yaml
+crawler:
+  sources:
+    x1080x:
+      concurrency: 1
+      rate_limit:
+        min_interval_seconds: 2
+        cooldown_seconds: 60
+        max_cooldown_seconds: 900
+```
+
+已有配置没有 `rate_limit` 时也采用以上节流和冷却默认值；已有显式并发配置保持生效，
+建议历史补抓使用并发 1。间隔由同一进程内共享的 x1080x HTTP 客户端统一控制，
+覆盖列表、详情、HTTP 重试及发起过盾请求。不同进程/容器不共享限流状态，
+同一出口不要同时启动多个补抓实例。上述值是保守起点，不代表站点公布的配额。
+
+列表与详情均识别站点限流提示，以及没有 CF 挑战特征的 HTTP 429。
+过盾服务返回限流页时同样进入冷却，不会作为正常详情送入解析器。
+直连响应的数字 `Retry-After` 大于当前冷却时间时优先遵守服务端要求。
+
+- 定时增量及 `retry-failed`：停止本轮，不再发送后续请求；限流不消耗单帖失败台账次数。
+- `backfill-pages`：自动等待后重试**原列表页或受限详情**，保留同批已获取的成功结果。
+  连续受限的冷却按 60、120、240、480、900 秒增加，之后每 900 秒重试；取得成功响应后重置。
+  限流恢复没有次数上限，持续受限时任务保持运行并输出等待日志。成功后继续剩余页和分类。
+- 当前页处理完成后才推进检查点。停止服务或 CLI 的 Ctrl+C 会唤醒冷却等待；
+  已保存批次保留，当前未完成页不推进，重启后使用 `--resume` 继续。
+  同批还在内存中的详情会随未完成页重新获取，已入库记录由去重逻辑跳过。
+- 普通网络终态失败、真正缺标题/日期/正文/磁链的详情仍按原有失败台账恢复机制处理，
+  不属于无限限流重试。此前已推进页面中的失败详情仍由台账恢复，`--resume` 不会回扫旧页。
+
+```powershell
+python run.py backfill-pages --source x1080x --end-page 1000 --resume
+python run.py retry-failed --source x1080x
+```
+
+详情校验日志及台账区分 `page_unavailable`、`missing_title`、`missing_date`、
+`missing_content`、`missing_magnet`。诊断 HTML 保存到 `data/debug/x1080x_detail_<tid>.html`，
+最多保留最近 20 个文件，每个最多 512 KiB；日志只输出页面标题、大小、原因与文件路径。
+`--dry-run` 不写诊断快照、失败台账、数据库或检查点。
+
 ```powershell
 # 运行一个或全部来源
 python run.py crawl --source javbee

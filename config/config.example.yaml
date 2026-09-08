@@ -105,7 +105,14 @@ crawler:
       # dry-run / retry-failed / 补抓不推送）
       notify_telegram: true
       # CF 过盾后请求走直连，低并发降低重新触发挑战概率
-      concurrency: 2
+      concurrency: 1
+      rate_limit:
+        # 所有列表、详情、HTTP 重试和过盾请求共用最小间隔。
+        min_interval_seconds: 2
+        # 补抓遇限流自动等待，连续受限时冷却翻倍，最多每 15 分钟重试。
+        # 不限制限流恢复次数；增量任务停止本轮，等待下次调度。
+        cooldown_seconds: 60
+        max_cooldown_seconds: 900
       http:
         timeout: 30
         # cf_clearance 绑定浏览器指纹，直连必须与过盾浏览器同族：

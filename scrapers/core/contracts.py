@@ -5,6 +5,12 @@ from .http import CrawlerHttpClient
 from .models import FetchResult
 
 
+class DetailValidationError(ValueError):
+    def __init__(self, reason: str, message: str = ""):
+        self.reason = reason
+        super().__init__(message or reason)
+
+
 @dataclass(frozen=True)
 class CrawlContext:
     source: str

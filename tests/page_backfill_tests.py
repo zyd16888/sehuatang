@@ -168,6 +168,63 @@ class X1080XBackfillTests(unittest.TestCase):
                 1, 2, typeids=["9999"], checkpoint_store=self.checkpoints
             )
 
+    def test_rate_limited_list_and_detail_recover_before_checkpoint(self):
+        from tests.x1080x_rate_limit_tests import RATE_HTML, scripted_client
+        urls = self._urls()
+        scraper = self._scraper({})
+        scraper.http, clock, calls = scripted_client({
+            urls["list1"]: [RATE_HTML, RATE_HTML, LIST_HTML],
+            urls["detail1001"]: [DETAIL_HTML],
+            urls["detail1002"]: [RATE_HTML, DETAIL_HTML],
+            urls["list2"]: [EMPTY_LIST_HTML],
+        })
+        waited = []
+
+        def wait(seconds):
+            self.assertEqual(0, self.checkpoints.load("x1080x", "5479"))
+            waited.append(seconds)
+            clock.wait(seconds)
+
+        scraper.http.gate._wait = wait
+        from unittest.mock import Mock
+        scraper.failure_store = Mock()
+        summary = scraper.backfill_pages(1, 2, checkpoint_store=self.checkpoints)
+        self.assertEqual(2, summary["saved"])
+        self.assertEqual(0, summary["failed"])
+        self.assertEqual(1, self.checkpoints.load("x1080x", "5479"))
+        self.assertEqual(240, sum(waited))
+        self.assertEqual(1, sum(url == urls["detail1001"] for url, _, _ in calls))
+        scraper.failure_store.record.assert_not_called()
+
+    def test_stop_during_detail_cooldown_keeps_previous_checkpoint(self):
+        from tests.x1080x_rate_limit_tests import RATE_HTML, scripted_client
+        from scrapers.sources.x1080x.rate_limit import CrawlStopped
+        urls = self._urls()
+        scraper = self._scraper({})
+        scraper.http, _, _ = scripted_client({
+            urls["list1"]: [LIST_HTML],
+            urls["detail1001"]: [DETAIL_HTML],
+            urls["detail1002"]: [RATE_HTML],
+        })
+        scraper.http.gate._wait = lambda _: scraper.http.gate.stop_event.set()
+        with self.assertRaises(CrawlStopped):
+            scraper.backfill_pages(1, 2, checkpoint_store=self.checkpoints)
+        self.assertEqual(0, self.checkpoints.load("x1080x", "5479"))
+
+    def test_dry_run_rate_limit_recovery_does_not_write(self):
+        from tests.x1080x_rate_limit_tests import RATE_HTML, scripted_client
+        urls = self._urls()
+        scraper = self._scraper({})
+        scraper.http, _, _ = scripted_client({
+            urls["list1"]: [RATE_HTML, LIST_HTML],
+            urls["detail1001"]: [DETAIL_HTML],
+            urls["detail1002"]: [RATE_HTML, DETAIL_HTML],
+        })
+        summary = scraper.backfill_pages(1, 1, dry_run=True, checkpoint_store=self.checkpoints)
+        self.assertEqual(0, summary["failed"])
+        self.assertEqual([], self.saved_items)
+        self.assertEqual(0, self.checkpoints.load("x1080x", "5479"))
+
 
 def _plate_html(tids):
     rows = "".join(

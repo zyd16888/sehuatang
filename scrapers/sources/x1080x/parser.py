@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from scrapers.core.contracts import DetailValidationError
 
 from util.javbee_code import normalize_code_key, resolve_x1080x_code
 
@@ -83,23 +84,29 @@ class X1080XParser:
         fid: int,
         typeid: str = "",
         section: str = "",
+        strict: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        def invalid(reason):
+            if strict:
+                raise DetailValidationError(reason)
+            return None
+
         soup = BeautifulSoup(html_content, "html.parser")
         page_text = soup.get_text(" ", strip=True)
         if self.is_unavailable(soup, page_text[:2000]):
-            return None
+            return invalid("page_unavailable")
 
         title = self._extract_title(soup)
         if not title:
-            return None
+            return invalid("missing_title")
 
         date_value = self._extract_publish_date(soup)
         if not date_value:
-            return None
+            return invalid("missing_date")
 
         content_node = self._content_node(soup)
         if content_node is None:
-            return None
+            return invalid("missing_content")
         content_html = content_node.decode_contents()
         content_text = content_node.get_text("\n", strip=True)
 

@@ -21,7 +21,7 @@ class FetchResult:
 
     @property
     def ok(self) -> bool:
-        return self.status_code == 200 and bool(self.body)
+        return self.status_code == 200 and bool(self.body) and not self.error_type
 
 
 @dataclass

@@ -34,6 +34,10 @@ _CHARSET_META_RE = re.compile(
 )
 
 
+class SiteRateLimited(Exception):
+    pass
+
+
 def is_cf_challenge(body: Optional[bytes], status: Optional[int]) -> bool:
     if status in CF_STATUS:
         return True
@@ -67,9 +71,11 @@ class FlareSolverrClient:
         proxy_url: Optional[str] = None,
         max_timeout_ms: int = 120000,
         request_timeout: Optional[float] = None,
+        raise_on_rate_limit: bool = False,
     ):
         self.endpoint = endpoint.strip().rstrip("/")
         self.proxy_url = proxy_url or None
+        self.raise_on_rate_limit = raise_on_rate_limit
         self.max_timeout_ms = int(max_timeout_ms)
         # 未显式指定时跟随解题预算，另留 30s 网络往返余量
         self.request_timeout = (
@@ -113,6 +119,11 @@ class FlareSolverrClient:
         except Exception as exc:
             log.error(f"FlareSolverr 请求失败: endpoint={self.endpoint} error={exc}")
             return None
+
+        response_body = (solution.get("response") or "").encode("utf-8")
+        if self.raise_on_rate_limit and (is_rate_limited(response_body)
+                or (solution.get("status") == 429 and not is_cf_challenge(response_body, 200))):
+            raise SiteRateLimited("FlareSolverr 返回站点限流响应")
 
         if solution.get("status") != 200:
             log.warning(

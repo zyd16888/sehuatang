@@ -111,20 +111,25 @@ async def _backfill_pages(
     if source == "x1080x":
         from scrapers.registry import _source_config
         from scrapers.x1080x_scraper import X1080XScraper
+        from scrapers.sources.x1080x.rate_limit import CrawlStopped
 
         # 与 registry 运行路径一致：合并顶层 x1080x 与 crawler.sources.x1080x，
         # 否则丢失 challenge.flaresolverr_url / concurrency 等来源级配置
         scraper = X1080XScraper(
             config=_source_config(get_config() or {}, "x1080x")
         )
-        summary = await _asyncio.to_thread(
-            scraper.backfill_pages,
-            start_page,
-            end_page,
-            typeids=typeids,
-            resume=resume,
-            dry_run=dry_run,
-        )
+        try:
+            summary = await _asyncio.to_thread(
+                scraper.backfill_pages,
+                start_page,
+                end_page,
+                typeids=typeids,
+                resume=resume,
+                dry_run=dry_run,
+            )
+        except CrawlStopped:
+            log.info("x1080x 补抓已停止，未完成页检查点未推进，可 --resume 继续")
+            return False
         log.info(f"x1080x 分页补抓完成: {summary}")
         success = not any(
             str(partition.get("stopped", "")).startswith("list_failed")

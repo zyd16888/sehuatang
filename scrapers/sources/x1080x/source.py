@@ -8,6 +8,7 @@ from scrapers.core.contracts import (
     CrawlRecord,
     CrawlTarget,
     DiscoveryResult,
+    DetailValidationError,
 )
 from scrapers.core.cf_challenge import is_rate_limited
 from scrapers.core.http import CrawlerHttpClient
@@ -34,8 +35,10 @@ DEFAULT_TYPE_MAP = {
 class X1080XSource:
     name = "x1080x"
 
-    def __init__(self, config: Mapping[str, Any], parser: Optional[X1080XParser] = None):
+    def __init__(self, config: Mapping[str, Any], parser: Optional[X1080XParser] = None,
+                 *, diagnostics: bool = True):
         self.config = dict(config)
+        self.diagnostics = diagnostics
         self.base_url = str(
             self.config.get("base_url", DEFAULT_BASE_URL)
         ).rstrip("/")
@@ -70,6 +73,8 @@ class X1080XSource:
         title = match.group(1).decode("utf-8", "ignore").strip() if match else ""
         dump_note = ""
         try:
+            if not self.diagnostics:
+                return
             debug_dir = Path(__file__).resolve().parents[3] / "data" / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             dump_path = debug_dir / f"x1080x_list_{typeid}_p{page}.html"
@@ -98,6 +103,7 @@ class X1080XSource:
             for page in range(1, self.page_limit + 1):
                 result = http.fetch(self.list_url(typeid, page), stage="list")
                 list_retries += max(0, result.attempts - 1)
+                self._check_rate_limit(result)
                 if not result.ok:
                     list_failures += 1
                     log.warning(
@@ -106,14 +112,6 @@ class X1080XSource:
                         f"error_type={result.error_type}"
                     )
                     break
-
-                if is_rate_limited(result.body):
-                    # 站点限流：立即中止整轮，继续请求只会加剧限流；
-                    # 下一个调度周期自然重试。
-                    raise RuntimeError(
-                        f"x1080x 命中站点限流（请求过于频繁），中止本轮: "
-                        f"typeid={typeid} page={page}"
-                    )
 
                 pages_fetched += 1
                 tids = self.parser.parse_list(result.body)
@@ -126,6 +124,7 @@ class X1080XSource:
                     retry_fetch = http.fetch(
                         self.list_url(typeid, page), stage="list"
                     )
+                    self._check_rate_limit(retry_fetch)
                     if retry_fetch.ok:
                         result = retry_fetch
                         tids = self.parser.parse_list(result.body)
@@ -172,17 +171,45 @@ class X1080XSource:
     ) -> Optional[CrawlRecord]:
         metadata = dict(target.metadata or {})
         tid = int(metadata.get("tid") or target.key)
-        payload = self.parser.parse_detail(
-            result.body,
-            target.url,
-            tid=tid,
-            fid=self.fid,
-            typeid=str(metadata.get("typeid") or ""),
-            section=str(metadata.get("section") or ""),
-        )
-        if payload is None:
-            return None
-        if not payload.get("magnet"):
-            # 无磁链帖对下游无价值；进失败台账按退避重试（磁链可能后补）。
-            return None
+        try:
+            payload = self.parser.parse_detail(
+                result.body,
+                target.url,
+                tid=tid,
+                fid=self.fid,
+                typeid=str(metadata.get("typeid") or ""),
+                section=str(metadata.get("section") or ""),
+                strict=True,
+            )
+            if not payload.get("magnet"):
+                raise DetailValidationError("missing_magnet")
+        except DetailValidationError as exc:
+            self._diagnose_detail(tid, result, exc.reason)
+            raise
         return CrawlRecord(target=target, payload=payload)
+
+    @staticmethod
+    def _check_rate_limit(result):
+        if result.error_type == "rate_limited" or is_rate_limited(result.body):
+            raise RuntimeError("x1080x 命中站点限流，中止本轮增量抓取，等待下次调度")
+
+    def _diagnose_detail(self, tid, result, reason):
+        raw = result.body or b""
+        match = re.search(rb"<title[^>]*>(.*?)</title>", raw[:5000], re.I | re.S)
+        title = match.group(1).decode("utf-8", "replace")[:160] if match else ""
+        dump_note = ""
+        if self.diagnostics:
+            try:
+                debug_dir = Path(__file__).resolve().parents[3] / "data" / "debug"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                dump_path = debug_dir / f"x1080x_detail_{tid}.html"
+                dump_path.write_bytes(raw[:512 * 1024])
+                files = sorted(debug_dir.glob("x1080x_detail_*.html"),
+                               key=lambda path: path.stat().st_mtime, reverse=True)
+                for old in files[20:]:
+                    old.unlink()
+                dump_note = f" dump={dump_path}"
+            except OSError as exc:
+                dump_note = f" dump_failed={exc}"
+        log.warning(f"x1080x 详情校验失败: tid={tid} reason={reason} "
+                    f"status={result.status_code} bytes={len(raw)} title={title!r}{dump_note}")

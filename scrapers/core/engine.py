@@ -8,6 +8,7 @@ from .contracts import (
     CrawlContext,
     CrawlFailure,
     DiscoveryResult,
+    DetailValidationError,
     FailureStore,
     NullFailureStore,
     RecordRepository,
@@ -72,6 +73,8 @@ class CrawlEngine:
         for start in range(0, len(targets), batch_size):
             batch = targets[start:start + batch_size]
             self._process_batch(context, source, repository, batch, summary)
+            if summary.details.get("rate_limited"):
+                break
 
         summary.elapsed_ms = int((time.monotonic() - started) * 1000)
         log.info(
@@ -102,6 +105,11 @@ class CrawlEngine:
         failures = []
         for target, result in zip(targets, fetch_results):
             summary.retries += max(0, result.attempts - 1)
+            if result.error_type == "rate_limited":
+                summary.failed += 1
+                summary.details["rate_limited"] = True
+                # 站点级暂时阻塞不计入单帖失败次数；补抓客户端会在返回前恢复。
+                continue
             if not result.ok:
                 failures.append(
                     CrawlFailure(
@@ -126,10 +134,12 @@ class CrawlEngine:
             try:
                 record = source.parse_detail(target, result)
             except Exception as exc:
+                error_type = (exc.reason if isinstance(exc, DetailValidationError)
+                              else type(exc).__name__.lower())
                 log.warning(
                     "详情解析异常: "
                     f"run_id={context.run_id} source={source.name} "
-                    f"target={target.key} error_type={type(exc).__name__.lower()}"
+                    f"target={target.key} error_type={error_type}"
                 )
                 failures.append(
                     CrawlFailure(
@@ -138,7 +148,7 @@ class CrawlEngine:
                         url=target.url,
                         stage="parse",
                         attempts=result.attempts,
-                        error_type=type(exc).__name__.lower(),
+                        error_type=error_type,
                         error_message=str(exc),
                         metadata=target.metadata,
                     )
