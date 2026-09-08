@@ -8,6 +8,8 @@
 """
 import threading
 import time
+from collections import OrderedDict
+from urllib.parse import urlsplit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import Iterable, List, Optional
@@ -39,6 +41,8 @@ class X1080XHttpClient:
         self._cookie: dict = {}
         self._cookie_lock = threading.Lock()
         self._solve_lock = threading.Lock()
+        self._cookie_version = 0
+        self._local = threading.local()
         self._user_agent = settings.user_agent
         self._flaresolverr = (
             FlareSolverrClient(
@@ -66,26 +70,28 @@ class X1080XHttpClient:
     # ---------- 引擎合同 ----------
 
     def fetch(self, url: str, stage: str = "detail") -> FetchResult:
+        started = time.monotonic()
+        version = self._cookie_version
         result = self._transport.fetch(url, stage)
         if not is_cf_challenge(result.body, result.status_code):
             return result
 
         log.info(f"触发 CF 挑战: stage={stage} url={redact_url(url)}")
-        body = self._resolve_challenge(url)
+        body, extra_attempts = self._resolve_challenge(url, version)
         if body is not None:
             return FetchResult(
                 url=url,
                 body=body,
                 status_code=200,
-                attempts=result.attempts + 1,
-                elapsed_ms=result.elapsed_ms,
+                attempts=result.attempts + extra_attempts,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
             )
         return FetchResult(
             url=url,
             body=None,
             status_code=result.status_code,
-            attempts=result.attempts + 1,
-            elapsed_ms=result.elapsed_ms,
+            attempts=result.attempts + extra_attempts,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
             error_type="cf_challenge",
             error_message="Cloudflare 挑战未通过",
         )
@@ -125,35 +131,43 @@ class X1080XHttpClient:
 
     def _request_with_cookies(self, url: str, **kwargs):
         headers = dict(kwargs.pop("headers", {}) or {})
-        headers["User-Agent"] = self._user_agent
-        return requests.get(
-            url,
-            cookies=self._cookie_copy(),
-            headers=headers,
-            **kwargs,
-        )
+        with self._cookie_lock:
+            headers["User-Agent"] = self._user_agent
+            cookies = {key: value for key, value in self._cookie.items() if value}
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+        session = self._local.session
+        session.cookies.clear()
+        response = session.get(url, cookies=cookies, headers=headers, **kwargs)
+        with self._cookie_lock:
+            self._cookie.update({key: value for key, value in response.cookies.get_dict().items()
+                                 if key != "cf_clearance"})
+        return response
 
     def _cookie_copy(self) -> dict:
         with self._cookie_lock:
             return {k: v for k, v in self._cookie.items() if v}
 
-    def _resolve_challenge(self, url: str) -> Optional[bytes]:
-        """持锁过盾。等锁的线程先用（可能已更新的）Cookie 直连重试。"""
+    def _resolve_challenge(self, url: str, version: int):
+        """仅当等待期间验证状态更新，才尝试复用；省掉必然失败的重复直连。"""
+        attempts = 0
         with self._solve_lock:
-            retry = self._transport.fetch(url, stage="cf_retry")
-            if retry.ok and not is_cf_challenge(retry.body, retry.status_code):
-                return retry.body
-
+            if version != self._cookie_version:
+                retry = self._transport.fetch(url, stage="cf_retry")
+                attempts += retry.attempts
+                if retry.ok and not is_cf_challenge(retry.body, retry.status_code):
+                    return retry.body, attempts
             body = self._bypass(url)
+            attempts += 1
             if body is not None:
-                return body
-
-            if self._cookie_copy():
+                return body, attempts
+            if self._flaresolverr and self._cookie_copy():
                 with self._cookie_lock:
                     self._cookie.clear()
+                    self._cookie_version += 1
                 log.warning("CF 过盾失败，已清空缓存 Cookie 重试")
-                return self._bypass(url)
-            return None
+                return self._bypass(url), attempts + 1
+            return None, attempts
 
     def _bypass(self, url: str) -> Optional[bytes]:
         if self._flaresolverr is None:
@@ -166,11 +180,33 @@ class X1080XHttpClient:
         body, cookies, user_agent = solution
         with self._cookie_lock:
             merge_solution_cookies(self._cookie, cookies)
-        if user_agent:
-            self._user_agent = user_agent
+            if user_agent:
+                self._user_agent = user_agent
+            self._cookie_version += 1
         log.info(
             "CF 过盾成功: "
             f"url={redact_url(url)} cookies={len(cookies)} "
             f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
         )
         return body
+
+
+# 只缓存内存中的来源会话；域名、代理、指纹或验证端点变化时自然隔离。
+_CLIENTS = OrderedDict()
+_CLIENTS_LOCK = threading.Lock()
+
+
+def shared_http_client(settings, endpoint, base_url):
+    key = (settings, endpoint, urlsplit(base_url).netloc.lower())
+    now = time.monotonic()
+    with _CLIENTS_LOCK:
+        cached = _CLIENTS.get(key)
+        if cached and now - cached[0] < 3600:
+            _CLIENTS.move_to_end(key)
+            return cached[1]
+        client = X1080XHttpClient(settings, flaresolverr_url=endpoint)
+        _CLIENTS[key] = (now, client)
+        _CLIENTS.move_to_end(key)
+        while len(_CLIENTS) > 8:
+            _CLIENTS.popitem(last=False)
+        return client

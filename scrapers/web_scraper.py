@@ -575,6 +575,7 @@ class WebScraper:
         merged = self.data_processor.merge_thread_data(results, info_list)
         cleaned_data = self.data_processor.clean_data(merged)
         cleaned_tids = {str(item.get("tid")) for item in cleaned_data}
+        merged_by_tid = {str(item.get("tid")): item for item in merged}
         for result in results:
             if result is None:
                 continue
@@ -582,12 +583,18 @@ class WebScraper:
             if str(basic_info.get("tid")) in cleaned_tids:
                 continue
             tid = str(basic_info["tid"])
+            # 日期不符是正常筛选，不应写入失败台账。
+            if tid not in merged_by_tid:
+                continue
+            missing = [key for key in ("tid", "post_time", "magnet")
+                       if not merged_by_tid[tid].get(key)]
             failures.append(
                 self._detail_failure(
                     basic_info,
                     f"https://{domain}/forum.php?mod=viewthread&tid={tid}",
                     "validate",
                     "invalid_record",
+                    "缺少必要字段: " + ", ".join(missing),
                 )
             )
 
@@ -601,6 +608,8 @@ class WebScraper:
         return cleaned_data, failure_count
 
     def retry_failed_details(self) -> Dict[str, int]:
+        # 失败目标已由台账选定；历史恢复不能再次套用当天日期筛选。
+        self.data_processor.date_filter = False
         targets = self.failure_store.due_targets("sehuatang")
         grouped: Dict[int, List[Dict[str, Any]]] = {}
         for target in targets:

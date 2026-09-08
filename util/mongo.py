@@ -3,6 +3,7 @@
 import pymongo
 from datetime import datetime, timedelta, timezone
 from util.log_util import log
+from util.failure_policy import describe_failure, max_failures, mongo_due_query, mongo_retry_count
 from util.config import date, mongodb_host, mongodb_port, mongodb_conn_str, mongodb_use_conn_str
 from util.resource_clock import (
     RESOURCE_FIELDS,
@@ -283,34 +284,39 @@ def record_crawl_failures(failures, collection=None):
     ensure_crawl_failure_indexes(collection)
 
     now = datetime.now(timezone.utc)
+    maximum = max_failures()
     operations = []
     for failure in failures:
-        attempts = max(1, int(failure.get("attempts", 1)))
-        retry_delay_minutes = min(24 * 60, 5 * (2 ** (attempts - 1)))
-        operations.append(
-            pymongo.UpdateOne(
-                {
-                    "source": failure["source"],
-                    "source_key": failure["source_key"],
-                    "stage": failure["stage"],
-                },
-                {
-                    "$set": {
-                        "url": failure["url"],
-                        "attempts": attempts,
-                        "error_type": failure.get("error_type") or "unknown",
-                        "error_message": str(failure.get("error_message") or "")[:1000],
-                        "metadata": dict(failure.get("metadata") or {}),
-                        "last_failed_at": now,
-                        "next_retry_at": now + timedelta(minutes=retry_delay_minutes),
-                        "resolved_at": None,
-                    },
-                    "$inc": {"failure_count": 1},
-                    "$setOnInsert": {"created_at": now},
-                },
-                upsert=True,
-            )
-        )
+        stage = (failure.get("metadata") or {}).get("retry_stage") or failure["stage"]
+        values = {
+            "last_stage": failure["stage"],
+            "url": failure["url"],
+            "attempts": max(1, int(failure.get("attempts", 1))),
+            "error_type": failure.get("error_type") or "unknown",
+            "error_message": str(failure.get("error_message") or "")[:1000],
+            "metadata": dict(failure.get("metadata") or {}),
+            "last_failed_at": now,
+            "resolved_at": None,
+        }
+        # Pipeline 原子更新计数和退避，兼容没有 retry_reset_count 的旧台账。
+        exponent = {"$min": [9, {"$max": [0, {"$subtract": [mongo_retry_count(), 1]}]}]}
+        delay_minutes = {"$min": [1440, {"$multiply": [5, {"$pow": [2, exponent]}]}]}
+        update = [
+            {"$set": {
+                **{key: {"$literal": value} for key, value in values.items()},
+                "failure_count": {"$add": [{"$ifNull": ["$failure_count", 0]}, 1]},
+                "retry_reset_count": {"$ifNull": ["$retry_reset_count", 0]},
+                "created_at": {"$ifNull": ["$created_at", now]},
+            }},
+            {"$set": {"next_retry_at": {"$cond": [
+                {"$gte": [mongo_retry_count(), maximum]}, None,
+                {"$add": [now, {"$multiply": [60000, delay_minutes]}]},
+            ]}}},
+        ]
+        operations.append(pymongo.UpdateOne(
+            {"source": failure["source"], "source_key": failure["source_key"],
+             "stage": stage}, update, upsert=True,
+        ))
     collection.bulk_write(operations, ordered=False)
 
 
@@ -332,11 +338,7 @@ def find_due_crawl_failures(source, now=None, collection=None, limit=500):
         collection = get_crawl_failure_collection()
     now = now or datetime.now(timezone.utc)
     rows = collection.find(
-        {
-            "source": source,
-            "resolved_at": None,
-            "next_retry_at": {"$lte": now},
-        },
+        mongo_due_query(source, now),
         {
             "_id": 0,
             "source_key": 1,
@@ -435,25 +437,57 @@ def find_recent_crawl_runs(source=None, limit=20, collection=None):
     return list(rows)
 
 
-def list_crawl_failures(source=None, limit=100, collection=None):
-    """列出失败台账（按最近失败时间倒序），并统计各来源到期待重试数。"""
+def list_crawl_failures(source=None, limit=100, collection=None, state=None):
     if collection is None:
         collection = get_crawl_failure_collection()
     now = datetime.now(timezone.utc)
-    query = {"source": source} if source else {}
-    rows = list(
-        collection.find(query, {"_id": 0, "metadata": 0}).sort(
-            "last_failed_at", pymongo.DESCENDING
-        ).limit(max(1, min(500, int(limit))))
+    maximum = max_failures()
+    match = {"resolved_at": None}
+    if source:
+        match["source"] = source
+    status_expr = {"$switch": {"branches": [
+        {"case": {"$gte": [mongo_retry_count(), maximum]}, "then": "exhausted"},
+        {"case": {"$and": [{"$ne": [{"$ifNull": ["$next_retry_at", None]}, None]},
+                             {"$lte": ["$next_retry_at", now]}]}, "then": "due"},
+    ], "default": "waiting"}}
+    prefix = [{"$match": match}, {"$set": {"state": status_expr}}]
+    groups = list(collection.aggregate(prefix + [
+        {"$group": {"_id": {"source": "$source", "state": "$state"}, "count": {"$sum": 1}}}
+    ]))
+    counts = {name: 0 for name in ("due", "waiting", "exhausted")}
+    due_counts = {}
+    for group in groups:
+        name, status = group["_id"]["source"], group["_id"]["state"]
+        counts[status] += group["count"]
+        if status == "due":
+            due_counts[name] = group["count"]
+    rows = collection.aggregate(prefix + ([{"$match": {"state": state}}] if state else []) + [
+        {"$sort": {"last_failed_at": -1}}, {"$limit": max(1, min(500, int(limit)))},
+        {"$project": {"_id": 0, "metadata": 0}},
+    ])
+    return {"failures": [describe_failure(row, maximum, now) for row in rows],
+            "due_counts": due_counts, "counts": counts, "max_failures": maximum}
+
+
+def requeue_crawl_failure(source, key, stage, collection=None):
+    return bool(_requeue_crawl_failures(
+        {"source": source, "source_key": key, "stage": stage}, collection))
+
+
+def requeue_exhausted_crawl_failures(source, collection=None):
+    return _requeue_crawl_failures({"source": source, "resolved_at": None,
+        "$expr": {"$gte": [mongo_retry_count(), max_failures()]}}, collection)
+
+
+def _requeue_crawl_failures(query, collection=None):
+    if collection is None:
+        collection = get_crawl_failure_collection()
+    now = datetime.now(timezone.utc)
+    result = collection.update_many(query,
+        [{"$set": {"retry_reset_count": {"$ifNull": ["$failure_count", 0]},
+                    "next_retry_at": now, "requeued_at": now, "resolved_at": None}}],
     )
-    due_counts = {
-        row["_id"]: row["count"]
-        for row in collection.aggregate([
-            {"$match": {"resolved_at": None, "next_retry_at": {"$lte": now}}},
-            {"$group": {"_id": "$source", "count": {"$sum": 1}}},
-        ])
-    }
-    return rows, due_counts
+    return result.matched_count
 
 
 def get_x1080x_collection():

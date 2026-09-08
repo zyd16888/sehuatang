@@ -1,5 +1,7 @@
 import asyncio
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
 
@@ -132,6 +134,8 @@ class SourceRegistry:
     def __init__(self):
         self._sources: Dict[str, SourceDefinition] = {}
         self._run_locks: Dict[str, threading.Lock] = {}
+        self._activities = {}
+        self._activity_lock = threading.Lock()
 
     def register(self, definition: SourceDefinition) -> None:
         if definition.name in self._sources:
@@ -147,6 +151,27 @@ class SourceRegistry:
         return tuple(
             name for name, lock in self._run_locks.items() if lock.locked()
         )
+
+    def active_tasks(self):
+        with self._activity_lock:
+            return [dict(task) for task in self._activities.values()]
+
+    @contextmanager
+    def activity(self, source, kind, description):
+        lock = self._run_locks[source]
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            yield False
+            return
+        with self._activity_lock:
+            self._activities[source] = {"source": source, "kind": kind,
+                "description": description, "started_at": time.time(), "running": True}
+        try:
+            yield True
+        finally:
+            with self._activity_lock:
+                self._activities.pop(source, None)
+            lock.release()
 
     @staticmethod
     def _record_run(result: Mapping[str, Any]) -> None:
@@ -189,19 +214,18 @@ class SourceRegistry:
             log.info(f"来源未启用，跳过: source={name}")
             return {"source": name, "status": "skipped"}
 
-        lock = self._run_locks[name]
-        if not lock.acquire(blocking=False):
-            log.warning(f"来源已在运行中，跳过本次触发: source={name}")
-            return {"source": name, "status": "already_running"}
-        try:
+        kind = "retry" if retry_failed else "crawl"
+        description = f"{name} {'失败重试' if retry_failed else '抓取'}" + (" · dry-run" if dry_run else "")
+        started = time.monotonic()
+        with self.activity(name, kind, description) as acquired:
+            if not acquired:
+                log.warning(f"来源已在运行中，跳过本次触发: source={name}")
+                return {"source": name, "status": "already_running"}
             result = await self._sources[name].runner(
-                config,
-                force=force,
-                dry_run=dry_run,
-                retry_failed=retry_failed,
+                config, force=force, dry_run=dry_run, retry_failed=retry_failed,
             )
-        finally:
-            lock.release()
+        result.setdefault("elapsed_ms", int((time.monotonic() - started) * 1000))
+        result.setdefault("kind", kind)
         self._record_run(result)
         return result
 

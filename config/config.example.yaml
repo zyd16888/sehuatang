@@ -56,6 +56,8 @@ crawler:
   retry_failed:
     enabled: true
     interval_minutes: 60
+    # 每条失败台账的累计上限，包含首次失败；达到后保留记录并停止重试。
+    max_failures: 5
   defaults:
     concurrency: 4
     http:

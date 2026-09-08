@@ -219,6 +219,39 @@ config 的 `crawler.sources.<source>.challenge.flaresolverr_url` 填
 
 脚本用途见 [scripts/README.md](scripts/README.md)。
 
+## 失败恢复与管理页
+
+`crawler.retry_failed.max_failures` 默认 **5**，表示一条失败台账本轮累计失败的上限，
+包含首次失败，与 `http.retry.attempts`（一次 HTTP 请求内部尝试次数）分开计数。
+失败后的等待时间按台账次数递增：5、10、20、40 分钟，最多 24 小时；
+实际执行还要等自动重试任务的下一个检查周期（默认 60 分钟）。
+到达上限后停止自动及普通手动 `retry-failed` 重试，但保留记录。
+旧台账即使没有新增字段，也会立即受上限约束，无需批量重写历史数据。
+
+管理页顶部显示当前运行任务、已运行时长、下次调度时间与倒计时。
+运行记录、失败台账、分页补抓、日志和配置分为独立标签，配置仅打开时加载。
+失败台账按来源和状态筛选；单条「重新入队」，或选择来源后「重新入队已达上限」，
+可以开启新一轮重试，历史 `failure_count` 不清零。
+重新入队只更新台账：等待自动检查，或点击来源卡片的「重试失败」立即执行。
+来源运行期间不允许重置其台账；分页补抓、定时抓取、手动重试共享来源互斥锁。
+
+台账以 `source + source_key + stage` 为原始身份。恢复过程中阶段变化时沿用原始身份
+和次数，用 `last_stage` 记录最新失败阶段，避免旧阶段一直到期造成无限重试。
+`retry_reset_count` 保存重新入队时的累计计数，本轮次数为二者差值；
+`requeued_at` 保存手动恢复时间。Mongo 和 JSON 使用同一政策。
+历史 sehuatang 详情恢复不再按当天过滤，正常的日期筛选也不再记为校验失败；
+真正缺少 `post_time` / `magnet` 等字段时会保留具体原因。
+
+R18 与 CF 采用最多三轮的验证转换，剩余拦截页不会进入正文解析。
+同一客户端的并发请求共享验证结果；线程内复用 HTTP 连接并合并响应 Cookie。
+x1080x 在同一进程内按域名、HTTP 设置（包括代理和指纹）、验证服务端点隔离缓存，
+一小时后重建，最多保留八个客户端。只有其他线程更新了验证结果时才补一次直连，
+请求耗时包含等待过盾的时间。缓存不写入磁盘，进程重启后首次请求可能需要重新验证。
+
+这些优化不能保证站点不再触发 CF。若每次请求仍遇挑战，请核对生产环境的
+代理出口、`impersonate`、UA 和实际 byparr/FlareSolverr 浏览器是否匹配；
+不能只改 UA 就认为浏览器指纹已一致。当前没有假定 byparr 支持持久浏览器 session。
+
 ## 项目结构
 
 ```text
@@ -240,6 +273,16 @@ run.py                  唯一 CLI 与 scheduler 入口
 [docs/CRAWLER_REFACTOR_TODO.md](docs/CRAWLER_REFACTOR_TODO.md)。
 
 ## 测试
+
+推荐使用隔离运行器，避免测试读取本机数据库配置或通知凭据：
+
+```powershell
+python -m tests.run_offline
+```
+
+Mongo 集成测试默认跳过；可将 `CRAWLER_TEST_MONGO_URI` 指向专用的本机临时
+MongoDB 后运行同一命令。测试仅允许 `127.0.0.1`，自行建立随机名称的测试数据库，
+结束后清理。不要将它指向日常使用的数据库实例。
 
 ```powershell
 mamba run -n ame python -m unittest `

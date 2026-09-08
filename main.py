@@ -78,7 +78,20 @@ async def main(sources=None, dry_run: bool = False):
     return results
 
 
-async def backfill_pages(
+async def backfill_pages(source, start_page, end_page, *, fids=None, typeids=None,
+                         resume=False, dry_run=False):
+    if source not in {"sehuatang", "x1080x"}:
+        raise ValueError(f"来源不支持分页补抓: {source}")
+    description = f"{source} 补抓第 {start_page}–{end_page} 页"
+    with source_registry.activity(source, "backfill", description) as acquired:
+        if not acquired:
+            log.warning(f"来源已在运行中，跳过补抓: source={source}")
+            return False
+        return await _backfill_pages(source, start_page, end_page, fids=fids,
+                                     typeids=typeids, resume=resume, dry_run=dry_run)
+
+
+async def _backfill_pages(
     source: str,
     start_page: int,
     end_page: int,

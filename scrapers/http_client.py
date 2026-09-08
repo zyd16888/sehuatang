@@ -8,6 +8,7 @@ HTTP 抓取客户端（curl_cffi + chrome110 指纹模拟）
 import os
 import re
 import threading
+from http.cookies import SimpleCookie
 from dataclasses import replace
 from typing import Optional
 
@@ -45,6 +46,12 @@ class HttpClient:
         self.headers = {"User-Agent": self.settings.user_agent or _DEFAULT_UA}
         self.cookie: dict = {"_safe": ""}
         self._cookie_lock = threading.Lock()
+        self._challenge_lock = threading.Lock()
+        self._cookie_version = 0
+        self._local = threading.local()
+        configured_cookie = SimpleCookie()
+        configured_cookie.load(str(get_config("sehuatang.cookie", "") or ""))
+        self.cookie.update({name: item.value for name, item in configured_cookie.items()})
         self._timeout = self.settings.timeout
         source_config = (
             ((full_config.get("crawler") or {}).get("sources") or {}).get(
@@ -91,31 +98,32 @@ class HttpClient:
     # ---------- 公共 API ----------
 
     def get_html(self, url: str) -> Optional[bytes]:
-        """获取页面 HTML（自动处理 R18 / CF）。失败返回 None。"""
-        try:
-            status, body = self._request(url)
-        except Exception as e:
-            log.error(f"请求失败: {url}, {e}")
-            return None
-
-        if self._is_cf_challenge(body, status):
-            log.warning(f"触发 CF: {url}")
-            return self._bypass_cf(url)
-
+        """验证状态转换最多三轮；任何剩余拦截页均不交给正文解析。"""
+        version = self._cookie_version
+        status, body = self._request(url)
+        if self._is_cf_challenge(body, status) or self._is_r18_block(body):
+            with self._challenge_lock:
+                # 其他线程已完成验证时先复用最新 Cookie。
+                if version != self._cookie_version:
+                    status, body = self._request(url)
+                for _ in range(3):
+                    if self._is_cf_challenge(body, status):
+                        log.info(f"触发 CF 验证: {url}")
+                        body = self._bypass_cf(url)
+                        status = 200 if body else 0
+                    elif self._is_r18_block(body):
+                        if not self._update_safeid_from_body(body):
+                            break
+                        log.info(f"触发 R18，更新验证 Cookie 重试: {url}")
+                        status, body = self._request(url)
+                    else:
+                        break
         if self._is_r18_block(body):
-            log.info(f"触发 R18，提取 safeid 重试: {url}")
-            if not self._update_safeid_from_body(body):
-                log.warning(f"R18 页面未找到 safeid: {url}")
-                return None
-            try:
-                status, body = self._request(url)
-            except Exception as e:
-                log.error(f"R18 重试失败: {url}, {e}")
-                return None
-            if self._is_r18_block(body):
-                log.warning(f"R18 重试后仍被拦截: {url}")
-                return None
-
+            log.warning(f"R18 验证未通过（已达验证上限）: {url}")
+            return None
+        if self._is_cf_challenge(body, status):
+            log.warning(f"CF 验证未通过（已达验证上限）: {url}")
+            return None
         if status != 200 or not body:
             log.warning(f"请求异常 status={status} url={url}")
             return None
@@ -129,13 +137,19 @@ class HttpClient:
 
     def _request_with_cookies(self, url: str, **kwargs):
         headers = dict(kwargs.pop("headers", {}) or {})
-        headers.update(self.headers)
-        return requests.get(
-            url,
-            cookies=self._cookie_copy(),
-            headers=headers,
-            **kwargs,
-        )
+        with self._cookie_lock:
+            headers.update(self.headers)
+            cookies = {key: value for key, value in self.cookie.items() if value}
+        # 每个线程复用连接；Cookie 统一由来源客户端同步，避免旧线程覆盖验证状态。
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+        session = self._local.session
+        session.cookies.clear()
+        response = session.get(url, cookies=cookies, headers=headers, **kwargs)
+        with self._cookie_lock:
+            self.cookie.update({key: value for key, value in response.cookies.get_dict().items()
+                                if key != "_safe"})
+        return response
 
     def _cookie_copy(self) -> dict:
         with self._cookie_lock:
@@ -146,6 +160,7 @@ class HttpClient:
             return
         with self._cookie_lock:
             self.cookie[key] = value
+            self._cookie_version += 1
 
     def _update_cookies_from_solution(self, items) -> None:
         if not items:
@@ -163,7 +178,7 @@ class HttpClient:
         # 注：拦截页的 <title> 是随机名人名（如"不详""塞缪尔·约翰逊"），不可作判定
         if not body or len(body) > 10000:
             return False
-        return b"var safeid" in body
+        return bool(_SAFEID_RE.search(body.decode("utf-8", errors="ignore")))
 
     def _update_safeid_from_body(self, body: bytes) -> bool:
         try:
@@ -175,21 +190,19 @@ class HttpClient:
         self._set_cookie("_safe", m.group(1))
         return True
 
-    def _bypass_cf(self, url: str, max_retry: int = 3) -> Optional[bytes]:
+    def _bypass_cf(self, url: str) -> Optional[bytes]:
         if self._flaresolverr is None:
-            log.warning("未配置 flaresolverr_url，无法自动过 CF，请求放弃")
+            log.warning("未配置 flaresolverr_url，无法完成 CF 验证")
             return None
         solution = self._flaresolverr.solve(url, cookies=self._cookie_copy())
         if solution is None:
             return None
         body, cookies, user_agent = solution
-        self._update_cookies_from_solution(cookies)
-        if user_agent:
-            self.headers["User-Agent"] = user_agent
-
-        if self._is_r18_block(body) and max_retry > 0:
-            if self._update_safeid_from_body(body):
-                return self._bypass_cf(url, max_retry - 1)
+        with self._cookie_lock:
+            merge_solution_cookies(self.cookie, cookies)
+            if user_agent:
+                self.headers["User-Agent"] = user_agent
+            self._cookie_version += 1
         return body
 
 

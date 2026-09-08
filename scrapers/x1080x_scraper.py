@@ -10,7 +10,7 @@ from scrapers.core.http import CrawlerHttpClient
 from scrapers.infrastructure import build_failure_store
 from scrapers.page_backfill import FixedTargetSource, PageCheckpointStore
 from scrapers.sources.x1080x import X1080XRepository, X1080XSource
-from scrapers.sources.x1080x.http_client import X1080XHttpClient
+from scrapers.sources.x1080x.http_client import shared_http_client
 from util.log_util import log
 from util.mongo import find_existing_x1080x_keys, save_x1080x_items
 from util.read_config import get_config
@@ -37,9 +37,10 @@ class X1080XScraper:
             else {"x1080x": self.config}
         )
         self.settings = load_source_settings(settings_config, "x1080x")
-        self.http = http or X1080XHttpClient(
+        self.http = http or shared_http_client(
             self.settings,
-            flaresolverr_url=_resolve_flaresolverr_url(self.config),
+            _resolve_flaresolverr_url(self.config),
+            self.config.get("base_url", ""),
         )
         self.failure_store = failure_store or build_failure_store(
             mongodb_enabled=bool(get_config("mongodb.enable", False))

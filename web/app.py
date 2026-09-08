@@ -35,7 +35,7 @@ class ActionTracker:
     def try_start(self, key: str, description: str) -> bool:
         with self._lock:
             current = self._actions.get(key)
-            if current and current["thread"].is_alive():
+            if current and (current["thread"] is None or current["thread"].is_alive()):
                 return False
             self._actions[key] = {
                 "description": description,
@@ -202,6 +202,8 @@ def create_app(
             ],
             "scheduler_jobs": jobs,
             "actions": tracker.snapshot(),
+            "active_tasks": source_registry.active_tasks(),
+            "server_time": datetime.now(timezone.utc).isoformat(),
         }
 
     @app.get("/api/runs", dependencies=[Depends(require_auth)])
@@ -215,18 +217,45 @@ def create_app(
             row["created_at"] = _iso_utc(row.get("created_at", ""))
         return {"runs": rows}
 
-    @app.get("/api/failures", dependencies=[Depends(require_auth)])
-    def failures(source: Optional[str] = None, limit: int = 100):
-        if not _mongodb_enabled():
-            return {"failures": [], "due_counts": {}}
-        from util.mongo import list_crawl_failures
+    def failure_store():
+        from scrapers.infrastructure import build_failure_store
+        return build_failure_store(mongodb_enabled=_mongodb_enabled())
 
-        rows, due_counts = list_crawl_failures(source=source, limit=limit)
-        for row in rows:
-            for key in ("last_failed_at", "next_retry_at", "created_at", "resolved_at"):
+    @app.get("/api/failures", dependencies=[Depends(require_auth)])
+    def failures(source: Optional[str] = None, limit: int = 100, state: Optional[str] = None):
+        if state and state not in {"due", "waiting", "exhausted"}:
+            raise HTTPException(status_code=400, detail="未知失败状态")
+        data = failure_store().snapshot(source=source, state=state, limit=limit)
+        for row in data["failures"]:
+            for key in ("last_failed_at", "next_retry_at", "created_at", "resolved_at", "requeued_at"):
                 if row.get(key) is not None:
                     row[key] = _iso_utc(row[key])
-        return {"failures": rows, "due_counts": due_counts}
+        return data
+
+    @app.post("/api/failures/requeue", dependencies=[Depends(require_auth)])
+    def requeue_failure(payload: dict):
+        source = str(payload.get("source") or "")
+        key = str(payload.get("key") or "")
+        stage = str(payload.get("stage") or "")
+        if source not in source_registry.names() or not key or not stage:
+            raise HTTPException(status_code=400, detail="缺少有效的来源、key 或阶段")
+        with source_registry.activity(source, "requeue", f"{source} 重新入队") as acquired:
+            if not acquired:
+                raise HTTPException(status_code=409, detail="来源正在运行，请完成后重新入队")
+            if not failure_store().requeue(source, key, stage):
+                raise HTTPException(status_code=404, detail="失败记录已不存在")
+        return {"ok": True}
+
+    @app.post("/api/failures/requeue-exhausted", dependencies=[Depends(require_auth)])
+    def requeue_exhausted(payload: dict):
+        source = str(payload.get("source") or "")
+        if source not in source_registry.names():
+            raise HTTPException(status_code=400, detail="请选择一个来源")
+        with source_registry.activity(source, "requeue", f"{source} 批量重新入队") as acquired:
+            if not acquired:
+                raise HTTPException(status_code=409, detail="来源正在运行，请完成后重新入队")
+            count = failure_store().requeue_exhausted(source)
+        return {"ok": True, "requeued": count}
 
     @app.get("/api/backfill-progress", dependencies=[Depends(require_auth)])
     def backfill_progress():
@@ -271,12 +300,15 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"未知来源: {source}")
         dry_run = bool(payload.get("dry_run", False))
 
+        if source in source_registry.running_sources():
+            raise HTTPException(status_code=409, detail=f"{source} 已有任务正在运行")
+
         def task():
             from main import crawl_sources
 
             asyncio.run(crawl_sources([source], force=True, dry_run=dry_run))
 
-        if not _spawn(tracker, f"crawl:{source}", f"抓取 {source}", task):
+        if not _spawn(tracker, f"source:{source}", f"抓取 {source}", task):
             raise HTTPException(status_code=409, detail=f"{source} 抓取已在进行中")
         return {"ok": True}
 
@@ -286,6 +318,9 @@ def create_app(
         if source not in source_registry.names():
             raise HTTPException(status_code=400, detail=f"未知来源: {source}")
 
+        if source in source_registry.running_sources():
+            raise HTTPException(status_code=409, detail=f"{source} 已有任务正在运行")
+
         def task():
             from main import crawl_sources
 
@@ -293,7 +328,7 @@ def create_app(
                 crawl_sources([source], force=True, retry_failed=True)
             )
 
-        if not _spawn(tracker, f"retry:{source}", f"重试失败 {source}", task):
+        if not _spawn(tracker, f"source:{source}", f"重试失败 {source}", task):
             raise HTTPException(status_code=409, detail=f"{source} 重试已在进行中")
         return {"ok": True}
 
@@ -314,6 +349,9 @@ def create_app(
         resume = bool(payload.get("resume", False))
         dry_run = bool(payload.get("dry_run", False))
 
+        if source in source_registry.running_sources():
+            raise HTTPException(status_code=409, detail=f"{source} 已有任务正在运行")
+
         def task():
             from main import backfill_pages
 
@@ -331,7 +369,7 @@ def create_app(
 
         if not _spawn(
             tracker,
-            f"backfill:{source}",
+            f"source:{source}",
             f"分页补抓 {source} {start_page}-{end_page}",
             task,
         ):

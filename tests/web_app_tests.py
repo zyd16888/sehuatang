@@ -11,6 +11,17 @@ from scrapers.registry import source_registry
 from web.app import create_app
 
 
+def setUpModule():
+    global _config_patch
+    _config_patch = mock.patch("util.read_config._config_manager._config_cache",
+                               {"mongodb": {"enable": False}})
+    _config_patch.start()
+
+
+def tearDownModule():
+    _config_patch.stop()
+
+
 def make_client(tmp_dir, token="test-token", **kwargs):
     config_path = Path(tmp_dir) / "config.yaml"
     config_path.write_text("mongodb:\n  enable: false\n", encoding="utf-8")
@@ -202,6 +213,49 @@ class LogsEndpointTests(unittest.TestCase):
             "/api/logs?file=error", headers=self.headers
         ).json()
         self.assertEqual(["boom"], data["lines"])
+
+
+class FailureLifecycleApiTests(unittest.TestCase):
+    def setUp(self):
+        from scrapers.core.contracts import CrawlFailure
+        from scrapers.infrastructure.json_failures import JsonFailureStore
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = JsonFailureStore(Path(self.tmp.name) / "failures.json")
+        for _ in range(5):
+            self.store.record([CrawlFailure("sehuatang", "42", "https://example.test/42",
+                                            "fetch", 1, "timeout")])
+        patcher = mock.patch("scrapers.infrastructure.build_failure_store", return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client, _ = make_client(self.tmp.name)
+        self.headers = {"X-Token": "test-token"}
+        self.payload = {"source": "sehuatang", "key": "42", "stage": "fetch"}
+
+    def test_filter_and_requeue_preserve_total_and_require_auth(self):
+        data = self.client.get("/api/failures?state=exhausted", headers=self.headers).json()
+        self.assertEqual(1, data["counts"]["exhausted"])
+        self.assertEqual(5, data["failures"][0]["retry_count"])
+        self.assertEqual(401, self.client.post("/api/failures/requeue", json=self.payload).status_code)
+        self.assertEqual(200, self.client.post("/api/failures/requeue", headers=self.headers,
+                                               json=self.payload).status_code)
+        row = self.client.get("/api/failures?state=due", headers=self.headers).json()["failures"][0]
+        self.assertEqual((5, 0), (row["failure_count"], row["retry_count"]))
+
+    def test_requeue_rejects_busy_source_and_invalid_state(self):
+        with source_registry.activity("sehuatang", "crawl", "test"):
+            response = self.client.post("/api/failures/requeue", headers=self.headers, json=self.payload)
+            self.assertEqual(409, response.status_code)
+            status = self.client.get("/api/status", headers=self.headers).json()
+            self.assertEqual("crawl", status["active_tasks"][0]["kind"])
+        self.assertEqual(400, self.client.get("/api/failures?state=unknown", headers=self.headers).status_code)
+
+    def test_bulk_requeue_requires_explicit_source(self):
+        url = "/api/failures/requeue-exhausted"
+        self.assertEqual(400, self.client.post(url, json={}, headers=self.headers).status_code)
+        result = self.client.post(url, json={"source": "sehuatang"}, headers=self.headers)
+        self.assertEqual({"ok": True, "requeued": 1}, result.json())
 
 
 class RegistryLockTests(unittest.TestCase):

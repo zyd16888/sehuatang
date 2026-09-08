@@ -52,7 +52,7 @@ class DataProcessor:
             }
 
             # 验证发布时间是否匹配目标日期
-            if not self.date_filter or self._is_valid_post_time(
+            if not merged_item.get("post_time") or not self.date_filter or self._is_valid_post_time(
                 merged_item.get("post_time", "")
             ):
                 merged_data.append(merged_item)

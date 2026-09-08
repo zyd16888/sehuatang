@@ -133,6 +133,8 @@ class SehuatangFailureTests(unittest.TestCase):
             {"filter_and_save_data": lambda self, rows, fid, **kwargs: rows},
         )()
 
+        from scrapers.data_processor import DataProcessor
+        scraper.data_processor = DataProcessor()
         summary = scraper.retry_failed_details()
 
         self.assertEqual({"requested": 1, "failed": 0, "saved": 1}, summary)
