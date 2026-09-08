@@ -6,7 +6,7 @@ from util.config import fid_list
 from util.read_config import get_config
 
 
-async def crawl_forum_section(fid: int) -> str:
+async def crawl_forum_section(fid: int) -> dict:
     """
     爬取论坛板块数据的入口函数
 

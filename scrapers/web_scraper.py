@@ -24,6 +24,33 @@ from .core.contracts import CrawlFailure
 from .infrastructure import build_failure_store
 
 
+def _new_run_stats(dry_run=False):
+    return {"discovered": 0, "requested": 0, "succeeded": 0, "saved": 0,
+            "failed": 0, "existing": 0, "filtered": 0, "dry_run": dry_run,
+            "list_requested": 0, "list_succeeded": 0, "stage_failures": {}, "errors": []}
+
+
+def _add_run_failure(summary, stage, count, message):
+    if count <= 0:
+        return
+    summary["failed"] += count
+    summary["stage_failures"][stage] = summary["stage_failures"].get(stage, 0) + count
+    if len(summary["errors"]) < 20:
+        summary["errors"].append({"stage": stage, "message": str(message)[:500]})
+
+
+def _finish_run_stats(summary, started):
+    successful = summary["succeeded"] or summary["filtered"]
+    if not summary["requested"]:
+        successful = successful or summary["existing"]
+    if not summary["requested"] and set(summary["stage_failures"]) == {"list"}:
+        successful = successful or summary["list_succeeded"]
+    summary["status"] = ("success" if not summary["failed"] else
+                         "partial_success" if successful else "failed")
+    summary["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    return summary
+
+
 class WebScraper:
     """Web 爬虫主类"""
 
@@ -49,49 +76,87 @@ class WebScraper:
 
     # ---------- 对外入口 ----------
 
-    async def crawl_forum_section(self, fid: int) -> str:
+    async def crawl_forum_section(self, fid: int) -> Dict[str, Any]:
+        started = time.monotonic()
+        summary = _new_run_stats(self.dry_run)
+        summary["fid"] = fid
         self.log.info(f"开始爬取板块 {fid}")
+        stage = "list"
         try:
-            plate_info_list, tid_list = self._get_plate_info_batch(fid)
-            if not tid_list:
-                self.log.info(f"板块 {fid} 没有找到符合条件的帖子")
-                return "没有新的数据"
+            info_list, _ = self._get_plate_info_batch(fid, summary=summary)
+            # 分页中重复出现的帖子只计一次发现和请求。
+            by_tid = {str(info["tid"]): info for info in info_list}
+            info_list = list(by_tid.values())
+            summary["discovered"] = len(info_list)
+            if info_list:
+                stage = "select"
+                _, new_info = self.data_manager.compare_existing_data(list(by_tid), fid, info_list)
+                summary["existing"] = len(info_list) - len(new_info)
+                stage = "detail"
+                notify_records = self._process_detail_targets(new_info, fid, summary)
+                if notify_records and not self.dry_run:
+                    # 通知入队不属于采集成功/失败判定。
+                    try:
+                        summary["notifications"] = self.notification_manager.enqueue_notifications(notify_records, fid)
+                    except Exception as exc:
+                        self.log.error(f"通知入队异常: fid={fid} error={type(exc).__name__}")
+        except Exception as exc:
+            _add_run_failure(summary, stage, 1, exc)
+            self.log.error(f"爬取板块 {fid} 时出错: {exc}")
+        return _finish_run_stats(summary, started)
 
-            self.log.info(f"即将开始爬取的页面: {' '.join(tid_list)}")
+    def _process_detail_targets(self, info_list, fid, summary):
+        """详情请求、校验和保存，发生异常时保留已经确认的统计。"""
+        if not info_list:
+            return []
+        summary["requested"] += len(info_list)
+        try:
+            records, failures = self._get_thread_details_batch_result(info_list)
+        except Exception as exc:
+            _add_run_failure(summary, "detail", len(info_list), exc)
+            self._record_processing_failures(info_list, "parse", exc)
+            return []
+        _add_run_failure(summary, "detail", failures, "详情请求、解析或校验失败，见失败台账")
+        summary["filtered"] += max(0, len(info_list) - len(records) - failures)
+        if not records:
+            return []
+        progress = {}
+        try:
+            result = self.data_manager.filter_and_save_data(
+                records, fid, strict=True, dry_run=self.dry_run, stats=progress)
+        except Exception as exc:
+            saved = progress.get("saved", 0)
+            completed = progress.get("saved_records", [])
+            summary["saved"] += saved
+            summary["succeeded"] += saved + progress.get("existing", 0)
+            summary["existing"] += progress.get("existing", 0)
+            failed_count = max(0, progress.get("candidates", len(records)) - saved)
+            _add_run_failure(summary, "save", failed_count, exc)
+            by_tid = {str(info["tid"]): info for info in info_list}
+            pending = progress.get("candidate_records", records)[saved:]
+            self._record_processing_failures([by_tid[str(row["tid"])] for row in pending], "save", exc)
+            if completed and not self.dry_run:
+                self._clear_detail_failures(completed)
+            self.log.error(f"板块 {fid} 保存失败: confirmed_saved={saved} failed={failed_count} error={exc}")
+            return completed
+        summary["saved"] += progress["saved"]
+        summary["existing"] += progress["existing"]
+        summary["succeeded"] += len(records)
+        if not self.dry_run:
+            self._clear_detail_failures(records)
+        return result
 
-            new_tid_list, new_info_list = self.data_manager.compare_existing_data(
-                tid_list, fid, plate_info_list
-            )
-            if not new_tid_list:
-                self.log.info(f"板块 {fid} 没有新数据需要爬取")
-                return "没有新的数据"
-
-            self.log.info(f"需要爬取的页面: {' '.join(new_tid_list)}")
-
-            detailed_data_list = self._get_thread_details_batch(new_info_list)
-            if not detailed_data_list:
-                self.log.info(f"板块 {fid} 没有获取到有效的详细数据")
-                return "没有新的数据"
-
-            self.log.info(f"本次抓取的数据条数为: {len(detailed_data_list)}")
-
-            self.log.info("开始写入数据库")
-            filtered_data = self.data_manager.filter_and_save_data(
-                detailed_data_list,
-                fid,
-                strict=True,
-                dry_run=self.dry_run,
-            )
-            if not self.dry_run:
-                self._clear_detail_failures(detailed_data_list)
-
-            if self.dry_run:
-                return f"dry-run：发现 {len(filtered_data)} 条新数据"
-            queued = self.notification_manager.enqueue_notifications(filtered_data, fid)
-            return f"采集完成，新增 {len(filtered_data)} 条；通知入队 {queued['queued']}，未入队 {queued['rejected']}"
-        except Exception as e:
-            self.log.error(f"爬取板块 {fid} 时出错: {e}")
-            return f"爬取失败: {str(e)}"
+    def _record_processing_failures(self, infos, stage, exc):
+        if self.dry_run or not infos:
+            return
+        try:
+            self.failure_store.record([
+                self._detail_failure(info, f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}",
+                                     stage, type(exc).__name__.lower(), str(exc))
+                for info in infos
+            ])
+        except Exception as ledger_error:
+            self.log.error(f"Sehuatang 失败台账写入失败: {ledger_error}")
 
     async def backfill_forum_section(
         self,
@@ -356,13 +421,14 @@ class WebScraper:
 
     # ---------- 内部 ----------
 
-    def _get_plate_info_batch(self, fid: int) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def _get_plate_info_batch(self, fid: int, summary=None) -> Tuple[List[Dict[str, Any]], List[str]]:
         pages = list(range(1, page_num + 1))
         return self._get_plate_info_pages(
             fid,
             pages,
             self.target_date or date(),
             ordered_by_dateline=False,
+            summary=summary,
         )
 
     def _get_plate_info_pages(
@@ -372,6 +438,7 @@ class WebScraper:
         target_date: str,
         ordered_by_dateline: bool,
         fail_on_missing: bool = False,
+        summary=None,
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         t0 = time.time()
         urls = [
@@ -379,6 +446,8 @@ class WebScraper:
             for page in pages
         ]
         self.log.info(f"正在批量请求 {len(urls)} 个板块页面（并发 {self.workers}）...")
+        if summary is not None:
+            summary["list_requested"] += len(urls)
         responses = self._fetch_many(urls)
 
         all_info: List[Dict[str, Any]] = []
@@ -387,18 +456,27 @@ class WebScraper:
         for page, body in zip(pages, responses):
             if not body:
                 self.log.warning(f"获取板块 {fid} 第 {page} 页内容失败")
+                if summary is not None:
+                    _add_run_failure(summary, "list", 1, f"板块 {fid} 第 {page} 页请求失败")
                 if fail_on_missing:
                     raise RuntimeError(f"获取板块 {fid} 第 {page} 页内容失败")
                 continue
             try:
-                info_list, tid_list = self.page_parser.parse_plate_page(body, target_date)
+                if summary is not None:
+                    info_list, tid_list = self.page_parser.parse_plate_page(body, target_date, strict=True)
+                else:
+                    info_list, tid_list = self.page_parser.parse_plate_page(body, target_date)
                 for info in info_list:
                     info["fid"] = fid
                 all_info.extend(info_list)
                 all_tids.extend(tid_list)
+                if summary is not None:
+                    summary["list_succeeded"] += 1
                 self.log.info(f"成功解析板块 {fid} 第 {page} 页，获得 {len(info_list)} 个帖子")
             except Exception as e:
                 self.log.error(f"解析板块 {fid} 第 {page} 页时出错: {e}")
+                if summary is not None:
+                    _add_run_failure(summary, "list", 1, f"板块 {fid} 第 {page} 页解析失败: {e}")
 
         self.log.info(f"批量获取板块列表页耗时: {time.time() - t0:.2f}秒")
         return all_info, all_tids
@@ -608,41 +686,39 @@ class WebScraper:
         failure_count = len(failures)
         return cleaned_data, failure_count
 
-    def retry_failed_details(self) -> Dict[str, int]:
-        # 失败目标已由台账选定；历史恢复不能再次套用当天日期筛选。
+    def retry_failed_details(self) -> Dict[str, Any]:
+        started = time.monotonic()
+        summary = _new_run_stats(self.dry_run)
         self.data_processor.date_filter = False
-        targets = self.failure_store.due_targets("sehuatang")
-        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        try:
+            targets = self.failure_store.due_targets("sehuatang")
+        except Exception as exc:
+            _add_run_failure(summary, "select", 1, exc)
+            return _finish_run_stats(summary, started)
+        summary["discovered"] = len(targets)
+        grouped = {}
         for target in targets:
             metadata = dict(target.metadata)
-            fid = int(metadata.get("fid") or target.partition or 0)
-            if not fid or not metadata.get("tid"):
-                self.log.warning(f"失败目标缺少 fid/tid，跳过: {target.key}")
+            try:
+                fid = int(metadata.get("fid") or target.partition or 0)
+                if not fid or not metadata.get("tid"):
+                    raise ValueError(f"失败目标缺少有效 fid/tid: {target.key}")
+            except (TypeError, ValueError) as exc:
+                _add_run_failure(summary, "target", 1, exc)
+                if not self.dry_run:
+                    try:
+                        self.failure_store.record([CrawlFailure(
+                            source="sehuatang", key=target.key, url=target.url, stage="validate",
+                            attempts=1, error_type="invalid_target_metadata", error_message=str(exc),
+                            metadata=metadata,
+                        )])
+                    except Exception as ledger_error:
+                        self.log.error(f"Sehuatang 失败台账写入失败: {ledger_error}")
                 continue
             grouped.setdefault(fid, []).append(metadata)
-
-        summary = {
-            "requested": sum(len(items) for items in grouped.values()),
-            "failed": 0,
-            "saved": 0,
-        }
         for fid, info_list in grouped.items():
-            detailed_data, failure_count = self._get_thread_details_batch_result(
-                info_list
-            )
-            summary["failed"] += failure_count
-            if not detailed_data:
-                continue
-            saved_data = self.data_manager.filter_and_save_data(
-                detailed_data,
-                fid,
-                strict=True,
-                dry_run=self.dry_run,
-            )
-            summary["saved"] += len(saved_data)
-            if not self.dry_run:
-                self._clear_detail_failures(detailed_data)
-        return summary
+            self._process_detail_targets(info_list, fid, summary)
+        return _finish_run_stats(summary, started)
 
     def _detail_failure(
         self,

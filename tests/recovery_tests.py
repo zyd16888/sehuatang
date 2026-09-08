@@ -126,7 +126,10 @@ class HistoricalRecoveryTests(unittest.TestCase):
         scraper.page_parser.parse_thread_page.return_value = {
             "post_time": "2020-01-01 08:00", "magnet": "magnet:?xt=urn:btih:test"}
         scraper.data_manager = mock.Mock()
-        scraper.data_manager.filter_and_save_data.side_effect = lambda rows, fid, **kwargs: rows
+        def save(rows, fid, **kwargs):
+            kwargs["stats"].update(saved=len(rows), existing=0)
+            return rows
+        scraper.data_manager.filter_and_save_data.side_effect = save
         return scraper
 
     def test_old_valid_post_retries_saves_and_clears(self):
@@ -135,7 +138,9 @@ class HistoricalRecoveryTests(unittest.TestCase):
         info = {"tid": "42", "fid": 103, "number": "TEST-42", "title": "test", "date": "2020-01-01"}
         scraper.failure_store.due_targets.return_value = [CrawlTarget("42", "url", "103", info)]
         result = scraper.retry_failed_details()
-        self.assertEqual({"requested": 1, "failed": 0, "saved": 1}, result)
+        self.assertEqual({"discovered": 1, "requested": 1, "failed": 0, "saved": 1},
+                         {key: result[key] for key in ("discovered", "requested", "failed", "saved")})
+        self.assertEqual("success", result["status"])
         scraper.failure_store.clear.assert_called_once_with("sehuatang", ["42"])
         scraper.failure_store.record.assert_not_called()
 

@@ -49,35 +49,24 @@ async def _run_sehuatang(
     configured_fids = source_config.get("fid") or {}
     fids = [int(fid) for fid in configured_fids]
     results = {}
-    failed = 0
     with SehuatangSource(dry_run=dry_run) as source:
         if retry_failed:
-            summary = source.retry_failed_details()
-            return {
-                "source": "sehuatang",
-                "status": (
-                    "partial_success"
-                    if summary["failed"] and summary["saved"]
-                    else ("failed" if summary["failed"] else "success")
-                ),
-                "dry_run": dry_run,
-                **summary,
-            }
+            return {"source": "sehuatang", **source.retry_failed_details()}
         for fid in fids:
-            result = await source.crawl_forum_section(fid)
-            results[str(fid)] = result
-            if isinstance(result, str) and result.startswith("爬取失败"):
-                failed += 1
-    return {
-        "source": "sehuatang",
-        "status": "partial_success" if failed and failed < len(fids) else (
-            "failed" if failed else "success"
-        ),
-        "sections": len(fids),
-        "failed_sections": failed,
-        "dry_run": dry_run,
-        "results": results,
-    }
+            results[str(fid)] = await source.crawl_forum_section(fid)
+    counters = ("discovered", "requested", "succeeded", "saved", "failed", "existing",
+                "filtered", "list_requested", "list_succeeded")
+    totals = {key: sum(row[key] for row in results.values()) for key in counters}
+    failures = sum(row["status"] != "success" for row in results.values())
+    any_success = any(row["status"] != "failed" for row in results.values())
+    stages = {}
+    for row in results.values():
+        for stage, count in row["stage_failures"].items():
+            stages[stage] = stages.get(stage, 0) + count
+    return {"source": "sehuatang", "dry_run": dry_run, **totals,
+            "status": "success" if not failures else "partial_success" if any_success else "failed",
+            "sections": len(fids), "failed_sections": failures,
+            "stage_failures": stages, "results": results}
 
 
 async def _run_javbee(

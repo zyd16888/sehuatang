@@ -127,17 +127,22 @@ class SehuatangFailureTests(unittest.TestCase):
         ]
         record = {"tid": "123", "post_time": "2026-09-04", "magnet": "m"}
         scraper._get_thread_details_batch_result = lambda info: ([record], 0)
+        def save(manager, rows, fid, **kwargs):
+            kwargs["stats"].update(saved=len(rows), existing=0)
+            return rows
         scraper.data_manager = type(
             "Manager",
             (),
-            {"filter_and_save_data": lambda self, rows, fid, **kwargs: rows},
+            {"filter_and_save_data": save},
         )()
 
         from scrapers.data_processor import DataProcessor
         scraper.data_processor = DataProcessor()
         summary = scraper.retry_failed_details()
 
-        self.assertEqual({"requested": 1, "failed": 0, "saved": 1}, summary)
+        self.assertEqual({"discovered": 1, "requested": 1, "failed": 0, "saved": 1},
+                         {key: summary[key] for key in ("discovered", "requested", "failed", "saved")})
+        self.assertEqual("success", summary["status"])
         self.assertEqual([("sehuatang", "123")], scraper.failure_store.cleared)
 
 

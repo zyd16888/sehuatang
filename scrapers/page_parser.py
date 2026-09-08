@@ -24,7 +24,7 @@ class PageParser:
             re.IGNORECASE,
         )
     
-    def parse_plate_page(self, html_content: str, date_time: str) -> tuple[List[Dict[str, Any]], List[str]]:
+    def parse_plate_page(self, html_content: str, date_time: str, strict: bool = False) -> tuple[List[Dict[str, Any]], List[str]]:
         """
         解析板块页面，提取帖子信息
         
@@ -35,7 +35,7 @@ class PageParser:
         Returns:
             tuple: (帖子信息列表, 帖子ID列表)
         """
-        all_info = self.parse_plate_page_all(html_content)
+        all_info = self.parse_plate_page_all(html_content, strict=strict)
         info_list = [
             item for item in all_info
             if str(item.get("date", "")).startswith(date_time)
@@ -43,18 +43,24 @@ class PageParser:
         tid_list = [item["tid"] for item in info_list]
         return info_list, tid_list
 
-    def parse_plate_page_all(self, html_content: str) -> List[Dict[str, Any]]:
+    def parse_plate_page_all(self, html_content: str, strict: bool = False) -> List[Dict[str, Any]]:
         """解析列表页中的全部普通主题，不做日期过滤。"""
         info_list = []
         try:
             soup = bs4.BeautifulSoup(html_content, "html.parser")
             all_threads = soup.find_all(id=re.compile("^normalthread_"))
+            if strict and not all_threads and not soup.find(id="threadlist") and not soup.find(id="threadlisttableid"):
+                raise ValueError("响应缺少板块列表结构")
             for thread in all_threads:
                 data = self._extract_thread_info(thread)
                 if data:
                     info_list.append(data)
+            if strict and all_threads and not info_list:
+                raise ValueError("板块主题存在但无法解析")
         except Exception as e:
             self.log.error(f"解析板块页面时出错: {e}")
+            if strict:
+                raise
         return info_list
 
     def parse_last_page(self, html_content: str) -> int:
