@@ -9,6 +9,9 @@ RESOURCE_FIELDS = (
     "magnet", "torrent", "img", "size",
 )
 
+# x1080x 分类及多磁链变化也算有效资源变更，爬虫与离线补录共用。
+X1080X_RESOURCE_FIELDS = RESOURCE_FIELDS + ("magnets", "typeid", "section")
+
 
 def fingerprint(document, fields=RESOURCE_FIELDS):
     values = {key: document.get(key) for key in fields}

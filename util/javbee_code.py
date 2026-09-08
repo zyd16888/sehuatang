@@ -125,13 +125,17 @@ def _title_kind(title_without_quality: str, matched_code: str) -> str:
 
 
 # x1080x 标题番号在括号里，如「(杏吧傳媒)(xb-5441)(20260828)标题」；
-# 要求字母开头 + 数字结尾，纯数字括号（日期）与纯文字括号（厂牌）不会命中。
+# 单字母必须有明确的 -/_ 分隔符，避免把括号里的 H264 等编码标记当成番号。
+_X1080X_CODE_TOKEN = r"(?:[A-Z]{2,15}[-_ ]?\d{1,9}|[A-Z][-_]\d{1,9})"
 _BRACKET_CODE_RE = re.compile(
-    r"[（(]\s*([A-Z]{2,15}[-_ ]?\d{2,9})\s*[）)]",
+    rf"[（(]\s*({_X1080X_CODE_TOKEN})\s*[）)]",
     re.IGNORECASE,
 )
 _MAGNET_DN_RE = re.compile(r"[?&]dn=([^&\s]+)", re.IGNORECASE)
-_DN_CODE_RE = re.compile(r"^([A-Z]{2,15})[-_]?(\d{2,9})$", re.IGNORECASE)
+_DN_CODE_RE = re.compile(
+    r"^(?=[A-Z]{2}|[A-Z][-_])([A-Z]{1,15})[-_]?(\d{1,9})$",
+    re.IGNORECASE,
+)
 
 
 def _format_code(letters: str, digits: str) -> str:

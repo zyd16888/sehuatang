@@ -7,6 +7,7 @@ from util.failure_policy import describe_failure, max_failures, mongo_due_query,
 from util.config import date, mongodb_host, mongodb_port, mongodb_conn_str, mongodb_use_conn_str
 from util.resource_clock import (
     RESOURCE_FIELDS,
+    X1080X_RESOURCE_FIELDS,
     collected_document,
     resource_update_pipeline,
 )
@@ -27,9 +28,6 @@ CRAWL_RUN_COLLECTION_NAME = "crawl_runs"
 
 # 运行历史保留 90 天，由 TTL 索引自动清理
 CRAWL_RUN_TTL_SECONDS = 90 * 24 * 3600
-
-# x1080x 的 typeid/section 归类变化也算有效资源变更；magnets 覆盖多磁链场景。
-X1080X_RESOURCE_FIELDS = RESOURCE_FIELDS + ("magnets", "typeid", "section")
 
 
 # 枚举，通过fid获取板块名称
