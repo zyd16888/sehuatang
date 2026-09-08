@@ -126,34 +126,37 @@ def _title_kind(title_without_quality: str, matched_code: str) -> str:
 
 # x1080x 标题番号在括号里，如「(杏吧傳媒)(xb-5441)(20260828)标题」；
 # 单字母必须有明确的 -/_ 分隔符，避免把括号里的 H264 等编码标记当成番号。
-_X1080X_CODE_TOKEN = r"(?:[A-Z]{2,15}[-_ ]?\d{1,9}|[A-Z][-_]\d{1,9})"
-_BRACKET_CODE_RE = re.compile(
-    rf"[（(]\s*({_X1080X_CODE_TOKEN})\s*[）)]",
-    re.IGNORECASE,
-)
+_BRACKET_CONTENT_RE = re.compile(r"[（(]([^()（）]+)[）)]")
 _MAGNET_DN_RE = re.compile(r"[?&]dn=([^&\s]+)", re.IGNORECASE)
-_DN_CODE_RE = re.compile(
-    r"^(?=[A-Z]{2}|[A-Z][-_])([A-Z]{1,15})[-_]?(\d{1,9})$",
+_SIMPLE_CODE_RE = re.compile(
+    r"(?=[A-Z]{2}|[A-Z][-_])([A-Z]{1,15})[-_ ]?(\d{1,9})",
     re.IGNORECASE,
 )
+_COMPOUND_CODE_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"[A-Z]{2,15}\d{8}[-_]\d{1,9}",  # THXP20230329_003、ZB20230329_028
+    r"[A-Z]{1,15}[-_]\d{1,9}(?:[-_]\d{1,9})+",  # MDSR-0010-1、AN-9-046
+    r"[A-Z]{2,15}(?:[-_][A-Z]{1,15})+[-_]\d{1,9}(?:[-_]\d{1,9})*",  # MNSC-MB-112
+))
 
 
-def _format_code(letters: str, digits: str) -> str:
-    return f"{letters.upper()}-{digits}"
+def _parse_x1080x_code_token(value) -> Optional[str]:
+    """完整匹配站点编号，保留前导零和分段，禁止截取编号前半段。"""
+    token = normalize_text(value).upper()
+    parts = _SIMPLE_CODE_RE.fullmatch(token)
+    if parts:
+        return f"{parts.group(1)}-{parts.group(2)}"
+    if any(pattern.fullmatch(token) for pattern in _COMPOUND_CODE_PATTERNS):
+        return token.replace("_", "-")
+    return None
 
 
 def resolve_x1080x_code(title, magnets=()) -> JavbeeCodeResolution:
     """x1080x 番号识别：标题括号 → 磁链 dn 参数 → 复用 javbee 开头规则。"""
     normalized_title = normalize_text(title)
-    match = _BRACKET_CODE_RE.search(normalized_title)
-    if match:
-        candidate = match.group(1)
-        parts = _DN_CODE_RE.match(candidate.replace(" ", "-"))
-        code = (
-            _format_code(parts.group(1), parts.group(2))
-            if parts
-            else candidate.upper().replace("_", "-").replace(" ", "-")
-        )
+    for candidate in _BRACKET_CONTENT_RE.findall(normalized_title):
+        code = _parse_x1080x_code_token(candidate)
+        if not code:
+            continue
         return JavbeeCodeResolution(
             code=code,
             source="title",
@@ -166,11 +169,10 @@ def resolve_x1080x_code(title, magnets=()) -> JavbeeCodeResolution:
         dn_match = _MAGNET_DN_RE.search(str(magnet or ""))
         if not dn_match:
             continue
-        dn_value = unquote(dn_match.group(1)).strip()
-        parts = _DN_CODE_RE.match(dn_value)
-        if parts:
+        code = _parse_x1080x_code_token(unquote(dn_match.group(1)))
+        if code:
             return JavbeeCodeResolution(
-                code=_format_code(parts.group(1), parts.group(2)),
+                code=code,
                 source="magnet_dn",
                 confidence="high",
                 rule="magnet_dn",

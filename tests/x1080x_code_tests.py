@@ -2,7 +2,9 @@ import copy
 import json
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 from scripts.backfill_x1080x_codes import backfill_codes, code_patch
 from util.javbee_code import normalize_code_key, resolve_javbee_code, resolve_x1080x_code
@@ -17,6 +19,10 @@ SAMPLES = [
     ("1013257", "(JVID)(jv-78)(20260303)COS星穹鐵道黃泉一人挑戰群男-米歐",
      "magnet:?xt=urn:btih:fe81ce357a36ea7c1c6f003123f7a666182c989e&dn=jv-78", "JV-78"),
 ]
+
+COMPOUND_SAMPLES = json.loads(
+    (Path(__file__).parent / "fixtures" / "x1080x_compound_codes.json").read_text(encoding="utf-8")
+)
 
 
 def sample_documents():
@@ -96,6 +102,41 @@ class CodeResolutionTests(unittest.TestCase):
         self.assertEqual("M-331", resolve_javbee_code(None, "M-331 标题").code)
         self.assertEqual("CUSTOM", resolve_javbee_code("CUSTOM", "M-331 标题").code)
 
+    def test_all_155_compound_identifiers_from_title_and_magnet(self):
+        self.assertEqual(155, len(COMPOUND_SAMPLES))
+        for sample in COMPOUND_SAMPLES:
+            token, expected = sample["token"], sample["expected"]
+            with self.subTest(token=token):
+                result = resolve_x1080x_code(f"(来源)({token})(20260908)描述")
+                self.assertEqual(expected, result.code)
+                self.assertEqual(("title", "high"), (result.source, result.confidence))
+                result = resolve_x1080x_code("描述", [f"magnet:?xt=urn:btih:abc&dn={quote(token)}"])
+                self.assertEqual(expected, result.code)
+                self.assertEqual(("magnet_dn", "high"), (result.source, result.confidence))
+
+    def test_compound_segments_and_leading_zeroes_are_preserved(self):
+        cases = {
+            "mdsr-0010-1": ("MDSR-0010-1", "MDSR00101"),
+            "mdsr-0010-2": ("MDSR-0010-2", "MDSR00102"),
+            "thxp20230329_003": ("THXP20230329-003", "THXP20230329003"),
+            "zb20230329_028": ("ZB20230329-028", "ZB20230329028"),
+            "an-9-046": ("AN-9-046", "AN9046"),
+            "mnsc-mb-097": ("MNSC-MB-097", "MNSCMB097"),
+        }
+        for token, expected in cases.items():
+            result = resolve_x1080x_code(f"（来源）（{token}）描述")
+            self.assertEqual(expected, (result.code, normalize_code_key(result.code)))
+        self.assertEqual("MDSR-0010-1", resolve_x1080x_code(
+            "描述", ["magnet:?dn=mdsr%2D0010%2D1"]
+        ).code)
+
+    def test_compound_tokens_are_not_truncated_to_a_valid_prefix(self):
+        for token in ("20230329_003", "MNSC-MB", "H264-1080", "MDSR--0010-1",
+                      "MDSR-0010-1-extra", "MDSR-0010-1.mp4", "MDSR-0010-1 描述"):
+            with self.subTest(token=token):
+                self.assertIsNone(resolve_x1080x_code(f"({token})描述").code)
+                self.assertIsNone(resolve_x1080x_code("描述", [f"magnet:?dn={quote(token)}"]).code)
+
 
 def matches(document, query):
     for key, value in query.items():
@@ -151,6 +192,32 @@ class FakeCollection:
 
 
 class CodeBackfillTests(unittest.TestCase):
+    def test_compound_batch_dry_run_reports_all_155_but_shows_only_50(self):
+        documents = [{"_id": index, "title": f"(来源)({row['token']})描述", "code": None}
+                     for index, row in enumerate(COMPOUND_SAMPLES)]
+        collection = FakeCollection(documents)
+        output = []
+        stats = backfill_codes(collection, dry_run=True, sample_limit=50, emit=output.append)
+        self.assertEqual((155, 155, 0, 0),
+                         (stats["total"], stats["resolved"], stats["unresolved"], stats["modified"]))
+        previews = [json.loads(line) for line in output if line.startswith("{")]
+        self.assertEqual(50, len(previews))
+        self.assertEqual([], collection.writes)
+        self.assertEqual(documents, collection.documents)
+
+    def test_compound_batch_apply_uses_full_codes_and_is_repeatable(self):
+        documents = [{"_id": index, "title": f"(来源)({row['token']})描述", "code": None}
+                     for index, row in enumerate(COMPOUND_SAMPLES)]
+        collection = FakeCollection(documents)
+        stats = backfill_codes(collection, batch_size=17, emit=lambda _: None)
+        self.assertEqual(155, stats["modified"])
+        for document, sample in zip(collection.documents, COMPOUND_SAMPLES):
+            self.assertEqual(sample["expected"], document["code"])
+            self.assertEqual(fingerprint(document, X1080X_RESOURCE_FIELDS), document["resource_fingerprint"])
+        second = backfill_codes(collection, emit=lambda _: None)
+        self.assertEqual(0, second["modified"])
+        self.assertEqual(155, len(collection.writes))
+
     def test_dry_run_shows_only_missing_sample_field_changes_without_writes(self):
         documents = sample_documents()
         collection = FakeCollection(documents)
