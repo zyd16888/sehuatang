@@ -241,6 +241,8 @@ class ApplicationRunner:
 
         from scrapers.sources.x1080x.http_client import stop_shared_clients
         stop_shared_clients()
+        from scrapers.core.storage import drain_writers
+        drain_writers()
 
         if self.scheduler_manager:
             self.scheduler_manager.stop()
@@ -254,7 +256,7 @@ class ApplicationRunner:
         try:
             # 检查配置文件
             from util.read_config import get_config
-            from scrapers.core.config import load_source_settings
+            from scrapers.core.config import load_source_settings, load_storage_settings
             from scrapers.registry import source_registry
             config = get_config()
             if not config:
@@ -262,6 +264,7 @@ class ApplicationRunner:
 
             for source_name in source_registry.names():
                 load_source_settings(config, source_name)
+                load_storage_settings(config, source_name)
 
             # 检查日志系统
             log.info("健康检查通过")

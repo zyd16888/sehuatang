@@ -74,6 +74,10 @@ crawler:
   defaults:
     concurrency: 4
     per_proxy_concurrency: 1
+    storage:
+      batch_size: 10
+      flush_interval_seconds: 1
+      queue_capacity: 100
     http:
       timeout: 30
       retry:
@@ -234,7 +238,8 @@ python run.py --mode health
 Compose 默认 `Asia/Shanghai`。
 
 `backfill-pages` 按页区间补抓：跳过已入库数据、不做日期过滤，检查点按完整
-处理完的页推进。启用 MongoDB 时存到 `crawl_checkpoints`，否则存到
+处理完且写入队列已确认的页推进。成功结果按 10 条或 1 秒由独立线程批量落库，
+本页结束强制提交尾批。启用 MongoDB 时存到 `crawl_checkpoints`，否则存到
 `data/page_backfill_progress.json`；新检查点按来源、站点、页区间和排序标识隔离。
 旧无范围 JSON 进度不自动继承，文件保留，可重扫并跳过已入库帖子。详情失败可靠
 写入台账后由 `retry-failed` 恢复；写库、台账或列表失败均不推进当前页，可用 `--resume` 继续。

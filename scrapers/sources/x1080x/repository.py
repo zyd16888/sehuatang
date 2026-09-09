@@ -2,6 +2,7 @@
 from typing import Callable, List, Sequence
 
 from scrapers.core.contracts import CrawlRecord, CrawlTarget, SaveResult
+from util.log_util import log
 
 
 class X1080XRepository:
@@ -30,7 +31,10 @@ class X1080XRepository:
         payloads = [dict(record.payload) for record in records]
         result = self._save_func(payloads)
         if self._on_saved is not None:
-            self._on_saved(payloads)
+            try:
+                self._on_saved(payloads)
+            except Exception as exc:
+                log.bind(module="x1080x").error(f"通知入队失败，不重试已完成的资源写入: {type(exc).__name__}")
         return SaveResult(
             processed=int(result.get("processed", len(records))),
             saved=int(result.get("upserted", 0)),

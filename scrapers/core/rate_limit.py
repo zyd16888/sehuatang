@@ -93,15 +93,15 @@ class RequestGate:
             if self._now() >= self._blocked_until:
                 self._delay = self.settings.cooldown_seconds
 
-    def wait_for_retry(self):
+    def wait_for_retry(self, cancel_event=None):
         while True:
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() or (cancel_event is not None and cancel_event.is_set()):
                 raise CrawlStopped()
             with self._lock:
                 delay = self._blocked_until - self._now()
             if delay <= 0:
                 return
-            self._wait(min(delay, 60))
+            self._wait(min(delay, 0.1 if cancel_event is not None else 60))
 
 
 def limited_result(result):
@@ -110,6 +110,7 @@ def limited_result(result):
 
 class BackfillHttpClient:
     """只重试限流目标，已取得的详情留在原结果位置；不消耗台账重试次数。"""
+    supports_cancellation = True
     def __init__(self, http):
         self.http = http
 
@@ -135,9 +136,10 @@ class BackfillHttpClient:
         return [self._recover(result, stage)
                 for result in self.http.fetch_many(urls, stage)]
 
-    def iter_completed(self, urls, stage="detail"):
+    def iter_completed(self, urls, stage="detail", cancel_event=None):
         if hasattr(self.http, "iter_completed"):
-            yield from self.http.iter_completed(urls, stage, recover=True)
+            kwargs = {"cancel_event": cancel_event} if getattr(type(self.http), "supports_cancellation", False) else {}
+            yield from self.http.iter_completed(urls, stage, recover=True, **kwargs)
         else:
             yield from enumerate(self.fetch_many(urls, stage))
 

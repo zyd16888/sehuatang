@@ -63,6 +63,14 @@ crawler:
     concurrency: 4
     # 每个固定代理端口的并发上限；省略时为 1，兼容旧配置。
     per_proxy_concurrency: 1
+    # 抓取与保存独立；满 10 个目标或首条等待 1 秒提交，页结束冲刷尾批。
+    storage:
+      batch_size: 10
+      flush_interval_seconds: 1
+      queue_capacity: 100
+      # 只重试幂等资源写入的连接故障；不重放失败台账计数。
+      retry_attempts: 3
+      retry_delay_seconds: 1
     # 三个来源均支持；来源内相同字段覆盖 defaults。
     rate_limit:
       site_interval_seconds: 0

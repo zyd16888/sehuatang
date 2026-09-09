@@ -95,6 +95,35 @@ def _merge_dict(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[st
     return merged
 
 
+@dataclass(frozen=True)
+class StorageSettings:
+    batch_size: int = 10
+    flush_interval_seconds: float = 1.0
+    queue_capacity: int = 100
+    retry_attempts: int = 3
+    retry_delay_seconds: float = 1.0
+
+    def validate(self):
+        for name in ("batch_size", "queue_capacity", "retry_attempts"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"storage.{name} 必须为正整数")
+        if not math.isfinite(self.flush_interval_seconds) or self.flush_interval_seconds <= 0:
+            raise ValueError("storage.flush_interval_seconds 必须为有限正数")
+        if not math.isfinite(self.retry_delay_seconds) or self.retry_delay_seconds < 0:
+            raise ValueError("storage.retry_delay_seconds 必须为有限非负数")
+
+
+def load_storage_settings(config, source):
+    crawler = config.get("crawler") or {}
+    raw = dict((crawler.get("defaults") or {}).get("storage") or {})
+    raw.update((config.get(source) or {}).get("storage") or {})
+    raw.update(((crawler.get("sources") or {}).get(source) or {}).get("storage") or {})
+    settings = StorageSettings(**raw)
+    settings.validate()
+    return settings
+
+
 def _legacy_source_settings(config: Mapping[str, Any], source: str) -> Dict[str, Any]:
     source_config = dict(config.get(source) or {})
     if source == "javbee":

@@ -22,6 +22,8 @@ from scrapers.core.rate_limit import BackfillHttpClient
 from .notification_manager import NotificationManager
 from .page_parser import PageParser
 from .core.contracts import CrawlFailure
+from .core.config import load_storage_settings, StorageSettings
+from .core.storage import BatchWriter, PendingWrite, completed_results, retry_resource_write
 from .infrastructure import build_failure_store
 
 
@@ -63,6 +65,7 @@ class WebScraper:
     ):
         self.log = log
         self.http = shared_http_client()
+        self.storage_settings = load_storage_settings(get_config(), "sehuatang")
         self.workers = self.http.settings.concurrency
         self.target_date = target_date
         self.dry_run = dry_run
@@ -110,6 +113,16 @@ class WebScraper:
         """详情请求、校验和保存，发生异常时保留已经确认的统计。"""
         if not info_list:
             return []
+        if hasattr(type(self.http), "iter_completed"):
+            saved = []
+            before = summary["succeeded"] + summary["failed"] + summary["filtered"]
+            try:
+                self._stream_detail_targets(info_list, fid, summary, saved)
+            except Exception as exc:
+                handled = summary["succeeded"] + summary["failed"] + summary["filtered"] - before
+                _add_run_failure(summary, "save", max(1, len(info_list) - handled), exc)
+                self.log.error(f"详情流水线未完成: fid={fid} confirmed_saved={len(saved)} error_type={type(exc).__name__}")
+            return saved
         summary["requested"] += len(info_list)
         try:
             records, failures = self._get_thread_details_batch_result(info_list)
@@ -391,7 +404,7 @@ class WebScraper:
             if not self.dry_run:
                 checkpoints.save("sehuatang", partition, page)
             self.log.info(
-                f"板块 {fid} 分页补抓进度: 第 {page} 页，"
+                f"本页处理完成: source=sehuatang partition={fid} page={page}，"
                 f"发现 {len(tid_list)} 条，新增请求 {len(new_tid_list)} 条"
             )
             if summary["last_page"] is not None and page >= summary["last_page"]:
@@ -595,8 +608,65 @@ class WebScraper:
         })
         return f"https://{domain}/forum.php?{query}"
 
+    def _stream_detail_targets(self, infos, fid, summary, saved):
+        infos = list({str(row["tid"]): row for row in infos}.values())
+        settings = getattr(self, "storage_settings", None) or StorageSettings()
+        summary["requested"] += len(infos)
+        urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in infos]
+
+        def persist(items):
+            rows = [item.record for item in items if item.record is not None]
+            failures = [item.failure for item in items if item.failure is not None]
+            if rows:
+                progress = {}
+                try:
+                    inserted = retry_resource_write(lambda: self.data_manager.filter_and_save_data(
+                        rows, fid, strict=True, stats=progress), settings, self.log)
+                except Exception:
+                    confirmed = progress.get("saved_records", [])
+                    saved.extend(confirmed)
+                    summary["saved"] += progress.get("saved", 0)
+                    summary["existing"] += progress.get("existing", 0)
+                    summary["succeeded"] += len(confirmed) + progress.get("existing", 0)
+                    raise
+                saved.extend(inserted)
+                summary["saved"] += progress.get("saved", len(inserted))
+                summary["existing"] += progress.get("existing", 0)
+                summary["succeeded"] += len(rows)
+            if failures:
+                self.failure_store.record(failures)
+            if rows:
+                self._clear_detail_failures(rows)
+
+        with BatchWriter("sehuatang", persist, settings=settings, context=f"partition={fid}") as writer:
+            for index, result in completed_results(self.http, urls, writer.failed):
+                writer.check()
+                if result.error_type == "rate_limited":
+                    _add_run_failure(summary, "detail", 1, "端口限流，等待后续恢复")
+                    continue
+                failures = []
+                rows, count = self._get_thread_details_batch_result(
+                    [infos[index]], responses=[result.body if result.ok else None], failures_out=failures)
+                _add_run_failure(summary, "detail", count, "详情请求、解析或校验失败")
+                summary["filtered"] += max(0, 1 - len(rows) - count)
+                if self.dry_run:
+                    summary["succeeded"] += len(rows)
+                    continue
+                for row in rows:
+                    writer.submit(PendingWrite(str(row["tid"]), record=row))
+                for failure in failures:
+                    writer.submit(PendingWrite(failure.key, failure=failure))
+        summary["write_batches"] = summary.get("write_batches", 0) + writer.batches
+        summary["persist_ms"] = summary.get("persist_ms", 0) + writer.persist_ms
+        summary["write_queue_wait_ms"] = summary.get("write_queue_wait_ms", 0) + writer.queue_wait_ms
+
     def _save_backfill_details(self, infos, fid):
         infos = list({str(row["tid"]): row for row in infos}.values())
+        if hasattr(type(self.http), "iter_completed"):
+            summary = _new_run_stats(self.dry_run)
+            saved = []
+            self._stream_detail_targets(infos, fid, summary, saved)
+            return saved, summary["failed"]
         saved, failed = [], 0
         def persist(rows):
             if rows:
@@ -624,10 +694,12 @@ class WebScraper:
         self,
         info_list: List[Dict[str, Any]],
         responses=None,
+        failures_out=None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         t0 = time.time()
         urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in info_list]
-        self.log.info(f"正在批量请求 {len(urls)} 个帖子详情页（来源并发上限 {self.workers}）...")
+        if responses is None:
+            self.log.info(f"正在批量请求 {len(urls)} 个帖子详情页（来源并发上限 {self.workers}）...")
         rate_urls = set()
         if responses is None:
             info_list = list({str(row["tid"]): row for row in info_list}.values())
@@ -683,7 +755,7 @@ class WebScraper:
                     )
                 )
 
-        self.log.info(f"_get_thread_details_batch 执行时间: {time.time() - t0:.2f}秒")
+        self.log.debug(f"详情解析耗时: {time.time() - t0:.2f}秒")
 
         merged = self.data_processor.merge_thread_data(results, info_list)
         cleaned_data = self.data_processor.clean_data(merged)
@@ -711,7 +783,9 @@ class WebScraper:
                 )
             )
 
-        if failures and not self.dry_run:
+        if failures_out is not None:
+            failures_out.extend(failures)
+        elif failures and not self.dry_run:
             try:
                 self.failure_store.record(failures)
             except Exception as e:

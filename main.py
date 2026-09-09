@@ -207,6 +207,8 @@ def _run_standalone():
     finally:
         from scrapers.core.pool import stop_shared_clients
         stop_shared_clients()
+        from scrapers.core.storage import drain_writers
+        drain_writers()
         shutdown_notifications(drain=completed)
 
 

@@ -45,6 +45,8 @@ class _SessionWorker:
 
 
 class SessionPool:
+    supports_cancellation = True
+
     def __init__(self, source, settings, *, session_factory=SessionHttpClient):
         settings.validate()
         self.settings = settings
@@ -75,11 +77,11 @@ class SessionPool:
             f"有效并发上限={min(settings.concurrency, len(self._workers))} "
             f"每端口请求间隔={settings.min_interval_seconds}s")
 
-    def _submit(self, url, stage, recover):
-        key = (url, stage, recover)
+    def _submit(self, url, stage, recover, cancel_event=None):
+        key = (url, stage, recover, cancel_event)
         with self._condition:
             while True:
-                if self._closed:
+                if self._closed or (cancel_event is not None and cancel_event.is_set()):
                     raise CrawlStopped()
                 if key in self._inflight:
                     return self._inflight[key]
@@ -97,7 +99,7 @@ class SessionPool:
                     lane_index = self._worker_lanes[index]
                     self._cursor = (lane_index + 1) % len(self.lanes)
                     self._busy.add(index)
-                    future = self._workers[index].submit(self._execute, lane_index, url, stage, recover)
+                    future = self._workers[index].submit(self._execute, lane_index, url, stage, recover, cancel_event)
                     self._inflight[key] = future
                     def release(done, index=index, key=key):
                         with self._condition:
@@ -113,14 +115,16 @@ class SessionPool:
                     return future
                 self._condition.wait(timeout=0.1)
 
-    def _execute(self, index, url, stage, recover):
+    def _execute(self, index, url, stage, recover, cancel_event=None):
         lane = self.lanes[index]
         attempts = elapsed = 0
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CrawlStopped()
             if recover:
-                lane.wait_for_retry()
+                lane.gate.wait_for_retry(cancel_event=cancel_event)
             with self._slots:
-                if self._closed:
+                if self._closed or (cancel_event is not None and cancel_event.is_set()):
                     raise CrawlStopped()
                 result = lane.fetch(url, stage)
             attempts += result.attempts
@@ -138,7 +142,7 @@ class SessionPool:
     def fetch_recovering(self, url, stage="detail"):
         return self._submit(url, stage, True).result()
 
-    def iter_completed(self, urls, stage="detail", recover=False):
+    def iter_completed(self, urls, stage="detail", recover=False, cancel_event=None):
         # 在途任务不超过 worker 容量；输入重复 URL 共用一次结果。
         grouped = {}
         for index, url in enumerate(urls):
@@ -150,10 +154,13 @@ class SessionPool:
                 url = next(pending_urls, None)
                 if url is None:
                     break
-                pending[self._submit(url, stage, recover)] = url
+                pending[self._submit(url, stage, recover, cancel_event)] = url
         fill()
         while pending:
-            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            if cancel_event is not None and cancel_event.is_set():
+                raise CrawlStopped()
+            completed, _ = wait(pending, timeout=0.1 if cancel_event is not None else None,
+                                return_when=FIRST_COMPLETED)
             for future in completed:
                 url = pending.pop(future)
                 result = future.result()

@@ -603,19 +603,22 @@ class PersistenceTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "disk unavailable"):
             CrawlEngine(http, ledger).run(source, repository)
 
-    def test_completed_result_is_saved_before_waiting_for_next_result(self):
+    def test_completed_result_is_saved_while_waiting_for_next_result(self):
+        from scrapers.core.config import StorageSettings
         saved = []
+        persisted = threading.Event()
         class Http:
             def iter_completed(self, urls):
                 yield 1, FetchResult(urls[1], b"ok", 200, 1, 0)
-                assert saved == ["2"], "成功结果必须在继续等待前保存"
+                assert persisted.wait(2), "没有新结果到达时也必须按时间提交已完成数据"
+                assert saved == ["2"]
                 yield 0, FetchResult(urls[0], b"ok", 200, 1, 0)
         targets = [CrawlTarget("1", "a"), CrawlTarget("2", "b")]
         source = SimpleNamespace(name="test", discover=lambda *a: DiscoveryResult(targets),
                                  parse_detail=lambda target, result: CrawlRecord(target, {}))
         repository = SimpleNamespace(select_targets=lambda rows: rows,
-            save_many=lambda rows: (saved.extend(row.target.key for row in rows), SaveResult(saved=len(rows)))[1])
-        result = CrawlEngine(Http()).run(source, repository)
+            save_many=lambda rows: (saved.extend(row.target.key for row in rows), persisted.set(), SaveResult(saved=len(rows)))[2])
+        result = CrawlEngine(Http(), storage_settings=StorageSettings(flush_interval_seconds=0.05)).run(source, repository)
         self.assertEqual(2, result.saved)
 
 

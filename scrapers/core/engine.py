@@ -16,6 +16,8 @@ from .contracts import (
 )
 from .http import CrawlerHttpClient, redact_url
 from .models import RunSummary
+from .config import StorageSettings
+from .storage import BatchWriter, PendingWrite, completed_results, retry_resource_write
 
 
 class CrawlEngine:
@@ -25,7 +27,9 @@ class CrawlEngine:
         self,
         http: CrawlerHttpClient,
         failure_store: Optional[FailureStore] = None,
+        storage_settings: Optional[StorageSettings] = None,
     ):
+        self.storage_settings = storage_settings or StorageSettings()
         self.http = http
         self.failure_store = failure_store or NullFailureStore()
 
@@ -38,6 +42,7 @@ class CrawlEngine:
         retry_failed: bool = False,
         run_id: Optional[str] = None,
         batch_size: int = 20,
+        page_context: str = "",
     ) -> RunSummary:
         logger = log.bind(module=source.name)
         context = CrawlContext(
@@ -69,24 +74,42 @@ class CrawlEngine:
         targets = list({target.key: target for target in targets}.values())
         summary.requested = len(targets)
 
-        # 分批抓取并入库：一批抓完立即保存，运行中途被杀
-        # （重启/断电）时已完成批次不丢失。
+        def persist(items):
+            records = [item.record for item in items if item.record is not None]
+            failures = [item.failure for item in items if item.failure is not None]
+            if records:
+                saved = retry_resource_write(lambda: repository.save_many(records), self.storage_settings, logger)
+                summary.saved += saved.saved
+                summary.updated += saved.updated
+            if failures:
+                # 失败台账会增加次数，不自动重放可能部分成功的写入。
+                self.failure_store.record(failures)
+            if records:
+                try:
+                    self.failure_store.clear(source.name, [record.target.key for record in records])
+                except Exception as exc:
+                    logger.error(f"失败台账清理失败: run_id={context.run_id} source={source.name} error={exc}")
+
         batch_size = max(1, int(batch_size))
-        for start in range(0, len(targets), batch_size):
-            batch = targets[start:start + batch_size]
-            if hasattr(type(self.http), "iter_completed"):
-                for index, result in self.http.iter_completed([target.url for target in batch]):
-                    self._process_batch(context, source, repository, [batch[index]], summary, [result])
-            else:
-                self._process_batch(context, source, repository, batch, summary)
-            if summary.details.get("rate_limited") and (
-                not hasattr(type(self.http), "all_cooling") or self.http.all_cooling
-            ):
-                break
+        with BatchWriter(source.name, persist, settings=self.storage_settings,
+                         context=f"run_id={context.run_id} {page_context}") as writer:
+            for start in range(0, len(targets), batch_size):
+                writer.check()
+                batch = targets[start:start + batch_size]
+                for index, result in completed_results(self.http, [target.url for target in batch], writer.failed):
+                    writer.check()
+                    self._process_batch(context, source, [batch[index]], summary, [result], writer)
+                if summary.details.get("rate_limited") and (
+                    not hasattr(type(self.http), "all_cooling") or self.http.all_cooling
+                ):
+                    break
+        summary.details.update(write_batches=writer.batches, persist_ms=writer.persist_ms,
+                               write_queue_wait_ms=writer.queue_wait_ms)
 
         summary.elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
-            "来源抓取结束: "
+            ("本页处理完成: " if page_context else "来源抓取结束: ")
+            + f"{page_context} "
             f"run_id={context.run_id} source={source.name} status={summary.status.value} "
             f"discovered={summary.discovered} requested={summary.requested} "
             f"succeeded={summary.succeeded} failed={summary.failed} "
@@ -99,18 +122,13 @@ class CrawlEngine:
         self,
         context: CrawlContext,
         source: SourceAdapter,
-        repository: RecordRepository,
         targets,
         summary: RunSummary,
-        completed_results=None,
+        fetch_results,
+        writer,
     ) -> None:
         """抓取、解析并保存一批目标，累加进汇总。"""
         logger = log.bind(module=source.name)
-        fetch_results = completed_results if completed_results is not None else self.http.fetch_many(
-            [target.url for target in targets],
-            stage="detail",
-        )
-
         records = []
         failures = []
         for target, result in zip(targets, fetch_results):
@@ -187,28 +205,8 @@ class CrawlEngine:
         summary.succeeded += len(records)
         summary.failed += len(failures)
 
-        if records and not context.dry_run:
-            saved = repository.save_many(records)
-            summary.saved += saved.saved
-            summary.updated += saved.updated
-
-        if failures and not context.dry_run:
-            try:
-                self.failure_store.record(failures)
-            except Exception as exc:
-                logger.error(
-                    "失败台账写入失败: "
-                    f"run_id={context.run_id} source={source.name} error={exc}"
-                )
-                raise
-        if records and not context.dry_run:
-            try:
-                self.failure_store.clear(
-                    source.name,
-                    [record.target.key for record in records],
-                )
-            except Exception as exc:
-                logger.error(
-                    "失败台账清理失败: "
-                    f"run_id={context.run_id} source={source.name} error={exc}"
-                )
+        if not context.dry_run:
+            for record in records:
+                writer.submit(PendingWrite(record.target.key, record=record))
+            for failure in failures:
+                writer.submit(PendingWrite(failure.key, failure=failure))

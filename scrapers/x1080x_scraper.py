@@ -2,7 +2,7 @@
 import os
 from typing import Dict, Optional
 
-from scrapers.core.config import load_source_settings
+from scrapers.core.config import load_source_settings, load_storage_settings
 from scrapers.core.contracts import CrawlTarget
 from scrapers.core.engine import CrawlEngine
 from scrapers.core.http import CrawlerHttpClient
@@ -37,6 +37,7 @@ class X1080XScraper:
                         "sources": {"x1080x": self.config}},
         }
         self.settings = load_source_settings(settings_config, "x1080x")
+        self.storage_settings = load_storage_settings(settings_config, "x1080x")
         self.http = http or shared_http_client(
             self.settings,
             _resolve_flaresolverr_url(self.config),
@@ -61,7 +62,7 @@ class X1080XScraper:
             refresh_all=bool(self.config.get("refresh_all", False)),
             on_saved=self._enqueue_new_items if notify else None,
         )
-        summary = CrawlEngine(self.http, self.failure_store).run(
+        summary = CrawlEngine(self.http, self.failure_store, getattr(self, "storage_settings", None)).run(
             source,
             repository,
             dry_run=dry_run,
@@ -107,7 +108,7 @@ class X1080XScraper:
             save_func=save_x1080x_items,
         )
         http = BackfillHttpClient(self.http)
-        engine = CrawlEngine(http, self.failure_store)
+        engine = CrawlEngine(http, self.failure_store, getattr(self, "storage_settings", None))
         checkpoints = checkpoint_store or build_checkpoint_store(
             "x1080x", start_page, end_page, self.config.get("base_url", ""),
             f"fid={source.fid};default")
@@ -204,6 +205,7 @@ class X1080XScraper:
                     FixedTargetSource(source, targets),
                     repository,
                     dry_run=dry_run,
+                    page_context=f"source=x1080x partition={typeid} page={page}",
                 )
                 summary["pages_scanned"] += 1
                 summary["discovered"] += len(targets)

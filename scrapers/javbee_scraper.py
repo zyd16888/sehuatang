@@ -1,7 +1,7 @@
 import time
 from typing import Dict, List, Optional
 
-from scrapers.core.config import load_source_settings
+from scrapers.core.config import load_source_settings, load_storage_settings
 from scrapers.core.contracts import NullFailureStore
 from scrapers.core.engine import CrawlEngine
 from scrapers.core.pool import shared_pool
@@ -69,6 +69,7 @@ class JavbeeScraper:
                         "sources": {"javbee": self.config}},
         }
         self.settings = load_source_settings(settings_config, "javbee")
+        self.storage_settings = load_storage_settings(settings_config, "javbee")
         self.base_url = str(
             self.config.get("base_url", "https://javbee.co")
         ).rstrip("/")
@@ -114,7 +115,7 @@ class JavbeeScraper:
             stale_lookup=find_stale_javbee_urls,
             save_func=save_javbee_items,
         )
-        summary = CrawlEngine(self.http, self.failure_store).run(
+        summary = CrawlEngine(self.http, self.failure_store, getattr(self, "storage_settings", None)).run(
             source,
             repository,
             dry_run=dry_run,

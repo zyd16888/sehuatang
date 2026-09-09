@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from scrapers.core.config import load_source_settings
+from scrapers.core.config import load_source_settings, StorageSettings
 from scrapers.core.contracts import (
     CrawlFailure,
     CrawlRecord,
@@ -366,7 +366,7 @@ class CrawlEngineTests(unittest.TestCase):
 
         repository = BatchRepository()
         http = OkHttp()
-        summary = CrawlEngine(http, self.FakeFailureStore()).run(
+        summary = CrawlEngine(http, self.FakeFailureStore(), StorageSettings(batch_size=3)).run(
             ManyTargetsSource(),
             repository,
             run_id="run-batch",
@@ -374,7 +374,7 @@ class CrawlEngineTests(unittest.TestCase):
         )
 
         self.assertEqual([2, 2, 1], http.batch_sizes)
-        self.assertEqual(3, repository.save_calls)
+        self.assertEqual(2, repository.save_calls)
         self.assertEqual(5, len(repository.saved_records))
         self.assertEqual(5, summary.saved)
         self.assertEqual(5, summary.succeeded)

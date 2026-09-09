@@ -20,6 +20,7 @@ sources/sehuatang      sources/javbee
 - `http.py`：单次传输、超时、错误分类和重试
 - `pool.py` / `session.py`：固定端口常驻会话、CF 处理、有界并发和在途去重
 - `rate_limit.py`：会话限速、冷却及补抓原目标恢复
+- `storage.py`：有界写入队列、独立定时批量落库、故障通知和退出冲刷
 - `contracts.py`：source、repository、failure store 的数据合同
 - `engine.py`：发现、筛选、详情抓取、解析、保存和运行汇总
 - `models.py`：请求结果及 `success/partial_success/failed` 状态

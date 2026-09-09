@@ -108,6 +108,7 @@ class SehuatangFailureTests(unittest.TestCase):
 
     def test_retry_failed_groups_by_fid_saves_and_clears(self):
         scraper = WebScraper.__new__(WebScraper)
+        scraper.http = object()  # 该测试注入详情结果，不启动 HTTP 流水线。
         scraper.log = __import__("util.log_util", fromlist=["log"]).log
         scraper.dry_run = False
         scraper.failure_store = FakeFailureStore()
