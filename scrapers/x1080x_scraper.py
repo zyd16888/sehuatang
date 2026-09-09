@@ -7,7 +7,7 @@ from scrapers.core.contracts import CrawlTarget
 from scrapers.core.engine import CrawlEngine
 from scrapers.core.http import CrawlerHttpClient
 from scrapers.infrastructure import build_failure_store
-from scrapers.page_backfill import FixedTargetSource, PageCheckpointStore
+from scrapers.page_backfill import FixedTargetSource, PageCheckpointStore, build_checkpoint_store
 from scrapers.sources.x1080x import X1080XRepository, X1080XSource
 from scrapers.sources.x1080x.http_client import shared_http_client
 from scrapers.sources.x1080x.rate_limit import BackfillHttpClient, RateLimitSettings
@@ -31,17 +31,16 @@ class X1080XScraper:
         base_url = os.getenv("CRAWLER_X1080X_BASE_URL", "").strip()
         if base_url:
             self.config["base_url"] = base_url
-        settings_config = (
-            {"crawler": {"sources": {"x1080x": self.config}}}
-            if "http" in self.config or "concurrency" in self.config
-            else {"x1080x": self.config}
-        )
+        settings_config = {
+            "x1080x": self.config,
+            "crawler": {"defaults": get_config("crawler.defaults", {}) or {},
+                        "sources": {"x1080x": self.config}},
+        }
         self.settings = load_source_settings(settings_config, "x1080x")
         self.http = http or shared_http_client(
             self.settings,
             _resolve_flaresolverr_url(self.config),
             self.config.get("base_url", ""),
-            RateLimitSettings.from_config(self.config),
         )
         self.failure_store = failure_store or build_failure_store(
             mongodb_enabled=bool(get_config("mongodb.enable", False))
@@ -109,7 +108,9 @@ class X1080XScraper:
         )
         http = BackfillHttpClient(self.http)
         engine = CrawlEngine(http, self.failure_store)
-        checkpoints = checkpoint_store or PageCheckpointStore()
+        checkpoints = checkpoint_store or build_checkpoint_store(
+            "x1080x", start_page, end_page, self.config.get("base_url", ""),
+            f"fid={source.fid};default")
 
         selected = {
             str(typeid): source.type_map[str(typeid)]

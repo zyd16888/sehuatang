@@ -1,4 +1,6 @@
 import os
+import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
@@ -20,13 +22,22 @@ class RetrySettings:
 class ProxySettings:
     enabled: bool = False
     url: str = ""
+    urls: tuple[str, ...] = ()
+
+    @property
+    def addresses(self):
+        return (self.urls or (self.url,)) if self.enabled else ("",)
 
     def validate(self) -> None:
         if not self.enabled:
             return
-        parsed = urlsplit(self.url)
-        if parsed.scheme.lower() not in _ALLOWED_PROXY_SCHEMES or not parsed.hostname:
-            raise ValueError("启用代理时必须提供有效的 http/https/socks5/socks5h URL")
+        for url in self.addresses:
+            parsed = urlsplit(url)
+            if parsed.scheme.lower() not in _ALLOWED_PROXY_SCHEMES or not parsed.hostname:
+                raise ValueError("启用代理时必须提供有效的 http/https/socks5/socks5h URL")
+            parsed.port  # 校验显式端口；HTTP(S) 可使用协议默认端口。
+        if len(set(self.addresses)) != len(self.addresses):
+            raise ValueError("代理地址不能重复")
 
 
 @dataclass(frozen=True)
@@ -41,8 +52,23 @@ class HttpSettings:
     impersonate: str = "chrome110"
     proxy: ProxySettings = field(default_factory=ProxySettings)
     retry: RetrySettings = field(default_factory=RetrySettings)
+    min_interval_seconds: float = 0.0
+    cooldown_seconds: float = 60.0
+    max_cooldown_seconds: float = 900.0
+    site_interval_seconds: float = 0.0
+    solver_url: str = ""
+    solver_provider: str = "byparr"
 
     def validate(self) -> None:
+        if not all(math.isfinite(value) for value in (self.timeout, self.min_interval_seconds,
+                self.site_interval_seconds, self.cooldown_seconds, self.max_cooldown_seconds)):
+            raise ValueError("HTTP 时间设置必须为有限数值")
+        if min(self.min_interval_seconds, self.site_interval_seconds) < 0:
+            raise ValueError("请求间隔不能为负数")
+        if not 0 < self.cooldown_seconds <= self.max_cooldown_seconds:
+            raise ValueError("冷却时间必须为正且不超过最大冷却时间")
+        if self.solver_provider not in {"byparr", "flaresolverr"}:
+            raise ValueError("challenge.provider 只支持 byparr 或 flaresolverr")
         if self.concurrency < 1:
             raise ValueError("concurrency 必须大于等于 1")
         if self.timeout <= 0:
@@ -135,6 +161,9 @@ def load_source_settings(
         proxy_override["enabled"] = _env_bool(environ[f"{prefix}PROXY_ENABLED"])
     if f"{prefix}PROXY_URL" in environ:
         proxy_override["url"] = environ[f"{prefix}PROXY_URL"]
+        proxy_override["urls"] = []
+    if f"{prefix}PROXY_URLS" in environ:
+        proxy_override["urls"] = json.loads(environ[f"{prefix}PROXY_URLS"])
     if proxy_override:
         http_override["proxy"] = proxy_override
     retry_override: Dict[str, Any] = {}
@@ -148,6 +177,11 @@ def load_source_settings(
     http = dict(raw.get("http") or {})
     proxy = dict(http.get("proxy") or raw.get("proxy") or {})
     retry = dict(http.get("retry") or {})
+    rate = dict(raw.get("rate_limit") or {})
+    challenge = dict(raw.get("challenge") or {})
+    urls = proxy.get("urls") or []
+    if not isinstance(urls, (list, tuple)) or any(not isinstance(url, str) for url in urls):
+        raise ValueError("http.proxy.urls 必须为代理地址列表")
 
     settings = HttpSettings(
         concurrency=int(raw.get("concurrency", 4)),
@@ -157,7 +191,15 @@ def load_source_settings(
         proxy=ProxySettings(
             enabled=bool(proxy.get("enabled", False)),
             url=str(proxy.get("url") or ""),
+            urls=tuple(url.strip() for url in urls),
         ),
+        min_interval_seconds=float(rate.get("min_interval_seconds", 2 if source == "x1080x" else 0)),
+        cooldown_seconds=float(rate.get("cooldown_seconds", 60)),
+        max_cooldown_seconds=float(rate.get("max_cooldown_seconds", 900)),
+        site_interval_seconds=float(rate.get("site_interval_seconds", 0)),
+        solver_url=str(environ.get(f"{prefix}FLARESOLVERR_URL") or challenge.get("flaresolverr_url")
+                       or (config.get("http_client", {}).get("flaresolverr_url") if source == "sehuatang" else "") or ""),
+        solver_provider=str(challenge.get("provider", "byparr")),
         retry=RetrySettings(
             attempts=int(retry.get("attempts", 3)),
             base_delay=float(retry.get("base_delay", 2)),

@@ -16,8 +16,11 @@ async def crawl_forum_section(fid: int) -> dict:
     Returns:
         爬取结果消息
     """
-    with WebScraper() as scraper:
-        return await scraper.crawl_forum_section(fid)
+    with source_registry.activity("sehuatang", "crawl", f"Sehuatang 板块 {fid}") as acquired:
+        if not acquired:
+            return {"source": "sehuatang", "status": "already_running"}
+        with WebScraper() as scraper:
+            return await scraper.crawl_forum_section(fid)
 
 
 async def crawl_sehuatang(dry_run: bool = False):
@@ -163,6 +166,13 @@ async def backfill(
     resume: bool = False,
     dry_run: bool = False,
 ) -> bool:
+    with source_registry.activity("sehuatang", "backfill", f"Sehuatang {year} 年补抓") as acquired:
+        if not acquired:
+            return False
+        return await _backfill_year(year, fids, resume, dry_run)
+
+
+async def _backfill_year(year, fids=None, resume=False, dry_run=False):
     """按年份补抓历史数据；未指定板块时使用配置中的全部板块。"""
     selected_fids = list(fids) if fids else list(fid_list)
     success = True
@@ -195,6 +205,8 @@ def _run_standalone():
         asyncio.run(main())
         completed = True
     finally:
+        from scrapers.core.pool import stop_shared_clients
+        stop_shared_clients()
         shutdown_notifications(drain=completed)
 
 

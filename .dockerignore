@@ -78,6 +78,7 @@ setup.cfg
 tox.ini
 
 # Database files
+data/
 *.db
 *.sqlite
 *.sqlite3

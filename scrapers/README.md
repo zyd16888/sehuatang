@@ -17,7 +17,9 @@ sources/sehuatang      sources/javbee
 `scrapers/core` 负责来源无关能力：
 
 - `config.py`：默认值、来源覆盖、环境变量覆盖和配置校验
-- `http.py`：代理、超时、可重试状态分类、指数退避、抖动和批量请求
+- `http.py`：单次传输、超时、错误分类和重试
+- `pool.py` / `session.py`：固定端口常驻会话、CF 处理、有界并发和在途去重
+- `rate_limit.py`：会话限速、冷却及补抓原目标恢复
 - `contracts.py`：source、repository、failure store 的数据合同
 - `engine.py`：发现、筛选、详情抓取、解析、保存和运行汇总
 - `models.py`：请求结果及 `success/partial_success/failed` 状态
@@ -36,10 +38,11 @@ sources/sehuatang      sources/javbee
 每个来源独立解析 `concurrency`、`http.timeout`、`http.proxy` 和
 `http.retry`。默认只重试连接类异常、空响应以及
 `408/425/429/500/502/503/504`，普通 `4xx` 不重试。退避时间使用指数增长和
-随机抖动，并尊重数字形式的 `Retry-After`。
+随机抖动，并尊重秒数或 HTTP 日期形式的 `Retry-After`。
 
-Sehuatang 的 R18 safeid 和 FlareSolverr 留在来源专属 `HttpClient` 中；普通
-网络重试委托给公共 transport。JavBee 直接使用公共 transport。
+三个来源使用公共 `SessionPool`，只有 Sehuatang 的 R18 safeid 是来源专属插件。
+普通 429/限流页由公共冷却控制，CF 挑战由公共验证层处理。完整配置见
+[通用多代理会话](../docs/MULTI_PROXY.md)。
 
 环境变量使用明确的来源前缀：
 
@@ -74,7 +77,7 @@ crawler:
 ```
 
 已有配置没有 `rate_limit` 时也采用以上节流和冷却默认值；已有显式并发配置保持生效，
-建议历史补抓使用并发 1。间隔由同一进程内共享的 x1080x HTTP 客户端统一控制，
+每个端口内部并发 1；来源总并发可按端口数设置。间隔由公共会话池分别控制，
 覆盖列表、详情、HTTP 重试及发起过盾请求。不同进程/容器不共享限流状态，
 同一出口不要同时启动多个补抓实例。上述值是保守起点，不代表站点公布的配额。
 
@@ -135,7 +138,7 @@ MongoDB 启用时写入 `crawl_failures` collection，否则写入
 ## 新增来源
 
 1. 在 `scrapers/sources/<name>` 实现来源发现和解析逻辑。
-2. 使用 `CrawlerHttpClient`，不要在来源内复制代理和重试循环。
+2. 使用 `shared_pool(source, settings, base_url)`；补抓可包装 `BackfillHttpClient`，不要复制代理和重试循环。
 3. 实现 `RecordRepository`，保留该来源自己的 schema 和唯一键。
 4. 在 `scrapers/registry.py` 显式注册来源及 runner。
 5. 为解析 fixture、刷新策略、部分成功和失败恢复补充测试。

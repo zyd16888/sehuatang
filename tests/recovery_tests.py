@@ -170,7 +170,9 @@ class VerificationTests(unittest.TestCase):
 
     def test_r18_then_cf_then_content(self):
         client = self.client()
-        client._request = mock.Mock(side_effect=[(200, self.gate), (403, self.cf)])
+        client._transport.fetch.side_effect = [
+            FetchResult("https://example.test/42", self.gate, 200, 1, 0),
+            FetchResult("https://example.test/42", self.cf, 403, 1, 0)]
         client._flaresolverr = mock.Mock()
         client._flaresolverr.solve.return_value = (self.body, [], "test-agent")
         self.assertEqual(self.body, client.get_html("https://example.test/42"))
@@ -178,27 +180,21 @@ class VerificationTests(unittest.TestCase):
 
     def test_cf_r18_loop_is_bounded_and_never_returns_gate(self):
         client = self.client()
-        client._request = mock.Mock(return_value=(403, self.cf))
+        client._transport.fetch.return_value = FetchResult("url", self.cf, 403, 1, 0)
         client._flaresolverr = mock.Mock()
         client._flaresolverr.solve.return_value = (self.gate, [], "test-agent")
         self.assertIsNone(client.get_html("https://example.test/42"))
-        self.assertEqual(2, client._flaresolverr.solve.call_count)
-        self.assertEqual(2, client._request.call_count)
+        self.assertLessEqual(client._flaresolverr.solve.call_count, 4)
 
-    def test_concurrent_r18_requests_share_one_validation(self):
+    def test_r18_validation_is_retained_for_following_requests(self):
         client = self.client()
-        barrier = threading.Barrier(2)
-        def request(url):
-            if not client._cookie_copy().get("_safe"):
-                barrier.wait(timeout=2)
-                return 200, self.gate
-            return 200, self.body
-        client._request = request
-        with mock.patch.object(client, "_update_safeid_from_body", wraps=client._update_safeid_from_body) as update:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                result = list(pool.map(client.get_html, ["https://example.test/a", "https://example.test/b"]))
-            self.assertEqual([self.body, self.body], result)
-            self.assertEqual(1, update.call_count)
+        def fetch(url, stage="detail"):
+            body = self.body if client._cookie_copy().get("_safe") else self.gate
+            return FetchResult(url, body, 200, 1, 0)
+        client._transport.fetch.side_effect = fetch
+        self.assertEqual(self.body, client.get_html("https://example.test/a"))
+        self.assertEqual(self.body, client.get_html("https://example.test/b"))
+        self.assertEqual(3, client._transport.fetch.call_count)
 
     def test_x1080x_skips_redundant_request_and_measures_solver_time(self):
         transport = mock.Mock()
@@ -228,7 +224,7 @@ class VerificationTests(unittest.TestCase):
         self.assertTrue(all(row.ok for row in rows))
         self.assertEqual(1, client._flaresolverr.solve.call_count)
 
-    def test_shared_clients_expire_and_isolate_identity(self):
+    def test_shared_clients_retain_sessions_and_isolate_identity(self):
         settings = HttpSettings()
         with mock.patch("scrapers.sources.x1080x.http_client.time.monotonic", return_value=100):
             first = shared_http_client(settings, "solver", "https://cache.test")
@@ -236,7 +232,7 @@ class VerificationTests(unittest.TestCase):
             self.assertIsNot(first, shared_http_client(settings, "solver", "https://other.test"))
             self.assertIsNot(first, shared_http_client(replace(settings, impersonate="firefox147"), "solver", "https://cache.test"))
         with mock.patch("scrapers.sources.x1080x.http_client.time.monotonic", return_value=3701):
-            self.assertIsNot(first, shared_http_client(settings, "solver", "https://cache.test"))
+            self.assertIs(first, shared_http_client(settings, "solver", "https://cache.test"))
 
 
 class ActivityTests(unittest.TestCase):

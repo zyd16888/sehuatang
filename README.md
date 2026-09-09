@@ -123,6 +123,7 @@ CRAWLER_JAVBEE_CONCURRENCY
 CRAWLER_JAVBEE_TIMEOUT
 CRAWLER_JAVBEE_PROXY_ENABLED
 CRAWLER_JAVBEE_PROXY_URL
+CRAWLER_JAVBEE_PROXY_URLS
 CRAWLER_JAVBEE_RETRY_ATTEMPTS
 CRAWLER_SEHUATANG_FLARESOLVERR_URL
 CRAWLER_X1080X_BASE_URL
@@ -140,8 +141,8 @@ SHT_WEB_TOKEN
 `proxy` 配置仍可读取，但新配置应使用 `crawler.sources.<source>`，避免同名配置
 串值。
 
-JavBee 和 x1080x 的运行入口向 HTTP 客户端传递合并后的来源配置，调节其并发、超时、
-代理和重试时应在 `crawler.sources.<source>` 明确填写，不要只修改 `crawler.defaults`。
+三个来源均支持 `crawler.defaults` 与 `crawler.sources.<source>` 合并配置，来源配置优先。
+多代理、会话隔离、CF 服务适配、限速和互斥的完整说明见 [通用多代理会话](docs/MULTI_PROXY.md)。
 环境变量需传入容器才会生效，可在 Compose 服务的 `environment` 中配置。
 
 ## Web 管理页
@@ -221,9 +222,10 @@ python run.py --mode health
 Compose 默认 `Asia/Shanghai`。
 
 `backfill-pages` 按页区间补抓：跳过已入库数据、不做日期过滤，检查点按完整
-处理完的页推进（保存在 `data/page_backfill_progress.json`，键为
-`source:partition`）。详情失败写入失败台账、由 `retry-failed` 恢复，不阻塞页
-进度；普通列表请求失败则该分区暂停且检查点不推进，可用 `--resume` 继续。
+处理完的页推进。启用 MongoDB 时存到 `crawl_checkpoints`，否则存到
+`data/page_backfill_progress.json`；新检查点按来源、站点、页区间和排序标识隔离。
+旧无范围 JSON 进度不自动继承，文件保留，可重扫并跳过已入库帖子。详情失败可靠
+写入台账后由 `retry-failed` 恢复；写库、台账或列表失败均不推进当前页，可用 `--resume` 继续。
 `--start-page` 默认 1，`--end-page` 包含在范围内，`--typeid` 和 `--fid` 可重复指定。
 **`--resume` 不会回扫已完成页中的失败详情**，这些目标需要通过失败台账恢复。
 x1080x 的站点限流采用下述自动冷却恢复，不按普通详情失败处理。
@@ -439,11 +441,10 @@ Telegram 已接收但客户端超时的请求，重试仍可能重复；内存�
 历史 sehuatang 详情恢复不再按当天过滤，正常的日期筛选也不再记为校验失败；
 真正缺少 `post_time` / `magnet` 等字段时会保留具体原因。
 
-Sehuatang 的 R18 与 CF 采用最多三轮的验证转换，剩余拦截页不会进入正文解析。
-同一客户端的并发请求共享验证结果；线程内复用 HTTP 连接并合并响应 Cookie。
-x1080x 在同一进程内按域名、HTTP 设置（包括代理和指纹）、验证服务端点隔离缓存，
-一小时后重建，最多保留八个客户端。只有其他线程更新了验证结果时才补一次直连，
-请求耗时包含等待过盾的时间。缓存不写入磁盘，进程重启后首次请求可能需要重新验证。
+三个来源统一使用常驻代理会话池，每个端口独立保存 Cookie/UA/冷却状态。
+会话跨批次复用，不再每批新建线程池或每小时强制重建客户端。Sehuatang R18 为来源插件。
+普通请求与过盾使用同一代理地址，Cookie 保留作用域和有效期，不写磁盘。
+参见 [配置、生命周期和恢复边界](docs/MULTI_PROXY.md)。
 
 这些优化不能保证站点不再触发 CF。若每次请求仍遇挑战，请核对生产环境的
 代理出口、`impersonate`、UA 和实际 byparr/FlareSolverr 浏览器是否匹配；

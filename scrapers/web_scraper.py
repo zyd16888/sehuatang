@@ -17,7 +17,8 @@ from util.read_config import get_config
 
 from .data_manager import DataManager
 from .data_processor import DataProcessor
-from .http_client import HttpClient
+from .http_client import shared_http_client
+from scrapers.core.rate_limit import BackfillHttpClient
 from .notification_manager import NotificationManager
 from .page_parser import PageParser
 from .core.contracts import CrawlFailure
@@ -61,7 +62,7 @@ class WebScraper:
         failure_store=None,
     ):
         self.log = log
-        self.http = HttpClient()
+        self.http = shared_http_client()
         self.workers = self.http.settings.concurrency
         self.target_date = target_date
         self.dry_run = dry_run
@@ -130,10 +131,11 @@ class WebScraper:
             summary["saved"] += saved
             summary["succeeded"] += saved + progress.get("existing", 0)
             summary["existing"] += progress.get("existing", 0)
-            failed_count = max(0, progress.get("candidates", len(records)) - saved)
+            failed_count = max(0, progress.get("candidates", len(records)) - saved - progress.get("confirmed_existing", 0))
             _add_run_failure(summary, "save", failed_count, exc)
             by_tid = {str(info["tid"]): info for info in info_list}
-            pending = progress.get("candidate_records", records)[saved:]
+            saved_keys = {str(row["tid"]) for row in progress.get("completed_records", completed)}
+            pending = [row for row in progress.get("candidate_records", records) if str(row["tid"]) not in saved_keys]
             self._record_processing_failures([by_tid[str(row["tid"])] for row in pending], "save", exc)
             if completed and not self.dry_run:
                 self._clear_detail_failures(completed)
@@ -167,6 +169,8 @@ class WebScraper:
         """按年份定位板块页码，并分批补抓历史主题。"""
         target_year = str(year)
         self.target_date = target_year
+        if not isinstance(self.http, BackfillHttpClient) and hasattr(type(self.http), "fetch"):
+            self.http = BackfillHttpClient(self.http)
         self.data_processor.target_date = target_year
 
         page_range = self._locate_year_page_range(fid, year)
@@ -241,37 +245,14 @@ class WebScraper:
                     self._save_backfill_checkpoint(year, fid, pages[-1])
                 continue
 
-            detailed_data, failure_count = self._get_thread_details_batch_result(
-                new_info_list
-            )
+            saved_data, failure_count = self._save_backfill_details(new_info_list, fid)
             summary["detail_failures"] += failure_count
+            summary["records_saved"] += len(saved_data)
             if failure_count:
                 checkpoint_enabled = False
-                self.log.warning(
-                    f"板块 {fid} 第 {pages[0]}-{pages[-1]} 页有 "
-                    f"{failure_count} 个详情页失败，检查点暂停推进"
-                )
-
-            if not detailed_data:
-                if checkpoint_enabled:
-                    self._save_backfill_checkpoint(year, fid, pages[-1])
-                continue
-
-            saved_data = self.data_manager.filter_and_save_data(
-                detailed_data,
-                fid,
-                strict=True,
-                dry_run=self.dry_run,
-            )
-            summary["records_saved"] += len(saved_data)
-            if not self.dry_run:
-                self._clear_detail_failures(detailed_data)
             if checkpoint_enabled:
                 self._save_backfill_checkpoint(year, fid, pages[-1])
-            self.log.info(
-                f"板块 {fid} 历史补抓进度: 第 {pages[0]}-{pages[-1]} 页，"
-                f"发现 {len(tid_list)} 条，新增 {len(saved_data)} 条"
-            )
+            self.log.info(f"板块 {fid} 历史补抓进度: 第 {pages[0]}-{pages[-1]} 页，新增 {len(saved_data)} 条")
 
         if summary["detail_failures"]:
             raise RuntimeError(
@@ -294,10 +275,13 @@ class WebScraper:
         列表按发帖时间倒序翻页，跳过已入库的 tid；详情失败写入
         失败台账由 retry-failed 恢复，不阻塞页检查点推进。
         """
-        from scrapers.page_backfill import PageCheckpointStore
+        if not isinstance(self.http, BackfillHttpClient) and hasattr(type(self.http), "fetch"):
+            self.http = BackfillHttpClient(self.http)
+        from scrapers.page_backfill import build_checkpoint_store
 
         self.data_processor.date_filter = False
-        checkpoints = checkpoint_store or PageCheckpointStore()
+        checkpoints = checkpoint_store or build_checkpoint_store(
+            "sehuatang", start_page, end_page, domain, "dateline")
         partition = str(fid)
 
         first_page = start_page
@@ -400,20 +384,9 @@ class WebScraper:
             summary["requested"] += len(new_tid_list)
 
             if new_info_list:
-                detailed_data, failure_count = self._get_thread_details_batch_result(
-                    new_info_list
-                )
+                saved_data, failure_count = self._save_backfill_details(new_info_list, fid)
                 summary["failed"] += failure_count
-                if detailed_data:
-                    saved_data = self.data_manager.filter_and_save_data(
-                        detailed_data,
-                        fid,
-                        strict=True,
-                        dry_run=self.dry_run,
-                    )
-                    summary["saved"] += len(saved_data)
-                    if not self.dry_run:
-                        self._clear_detail_failures(detailed_data)
+                summary["saved"] += len(saved_data)
 
             if not self.dry_run:
                 checkpoints.save("sehuatang", partition, page)
@@ -439,33 +412,12 @@ class WebScraper:
         return Path(__file__).resolve().parent.parent / "data" / "backfill_progress.json"
 
     def _load_backfill_checkpoint(self, year: int, fid: int) -> int:
-        path = self._checkpoint_path()
-        if not path.exists():
-            return 0
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return int(data.get(f"{year}:{fid}", 0) or 0)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
-            self.log.warning(f"读取历史补抓检查点失败，将从定位页开始: {e}")
-            return 0
+        from scrapers.page_backfill import PageCheckpointStore
+        return PageCheckpointStore(self._checkpoint_path()).load(str(year), fid)
 
     def _save_backfill_checkpoint(self, year: int, fid: int, page: int) -> None:
-        path = self._checkpoint_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                data = {}
-
-        data[f"{year}:{fid}"] = page
-        temp_path = path.with_suffix(".tmp")
-        temp_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temp_path.replace(path)
+        from scrapers.page_backfill import PageCheckpointStore
+        PageCheckpointStore(self._checkpoint_path()).save(str(year), fid, page)
 
     def initialize_homepage(self) -> bool:
         """HTTP 模式无需浏览器预热，保留接口兼容 main.py。"""
@@ -643,6 +595,27 @@ class WebScraper:
         })
         return f"https://{domain}/forum.php?{query}"
 
+    def _save_backfill_details(self, infos, fid):
+        infos = list({str(row["tid"]): row for row in infos}.values())
+        saved, failed = [], 0
+        def persist(rows):
+            if rows:
+                saved.extend(self.data_manager.filter_and_save_data(
+                    rows, fid, strict=True, dry_run=self.dry_run))
+                if not self.dry_run:
+                    self._clear_detail_failures(rows)
+        if isinstance(self.http, BackfillHttpClient):
+            urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in infos]
+            for index, result in self.http.iter_completed(urls):
+                rows, count = self._get_thread_details_batch_result(
+                    [infos[index]], responses=[result.body if result.ok else None])
+                failed += count
+                persist(rows)
+        else:
+            rows, failed = self._get_thread_details_batch_result(infos)
+            persist(rows)
+        return saved, failed
+
     def _get_thread_details_batch(self, info_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         detailed_data, _ = self._get_thread_details_batch_result(info_list)
         return detailed_data
@@ -650,16 +623,25 @@ class WebScraper:
     def _get_thread_details_batch_result(
         self,
         info_list: List[Dict[str, Any]],
+        responses=None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         t0 = time.time()
         urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in info_list]
         self.log.info(f"正在批量请求 {len(urls)} 个帖子详情页（并发 {self.workers}）...")
-        responses = self._fetch_many(urls)
+        rate_urls = set()
+        if responses is None:
+            info_list = list({str(row["tid"]): row for row in info_list}.values())
+            urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in info_list]
+            responses = self._fetch_many(urls)
+            rate_urls = getattr(self, "_last_rate_limited_urls", set())
 
         results: List[Optional[tuple]] = []
         failures = []
         for i, body in enumerate(responses):
             tid = info_list[i]["tid"]
+            if urls[i] in rate_urls:
+                results.append(None)
+                continue
             if not body:
                 self.log.warning(f"获取帖子页面内容失败: {tid}")
                 results.append(None)
@@ -734,8 +716,9 @@ class WebScraper:
                 self.failure_store.record(failures)
             except Exception as e:
                 self.log.error(f"Sehuatang 失败台账写入失败: {e}")
+                raise
 
-        failure_count = len(failures)
+        failure_count = len(failures) + len(rate_urls)
         return cleaned_data, failure_count
 
     def retry_failed_details(self) -> Dict[str, Any]:
@@ -804,6 +787,10 @@ class WebScraper:
         """按输入顺序返回结果。同一 URL 失败位置为 None。"""
         if not urls:
             return []
+        if hasattr(type(self.http), "fetch_many"):
+            fetched = self.http.fetch_many(urls)
+            self._last_rate_limited_urls = {row.url for row in fetched if row.error_type == "rate_limited"}
+            return [result.body if result.ok else None for result in fetched]
         results: List[Optional[bytes]] = [None] * len(urls)
         with ThreadPoolExecutor(max_workers=min(self.workers, len(urls))) as pool:
             futures = {pool.submit(self.http.get_html, u): i for i, u in enumerate(urls)}

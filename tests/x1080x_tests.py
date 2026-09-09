@@ -376,7 +376,7 @@ class X1080XMongoTests(unittest.TestCase):
 
 class CfChallengeDetectionTests(unittest.TestCase):
     def test_detects_by_status_title_and_marker(self):
-        self.assertTrue(is_cf_challenge(b"", 403))
+        self.assertFalse(is_cf_challenge(b"", 403))
         self.assertTrue(
             is_cf_challenge(b"<title>Just a moment...</title>", 200)
         )

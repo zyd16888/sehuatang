@@ -276,10 +276,8 @@ def create_app(
 
     @app.get("/api/backfill-progress", dependencies=[Depends(require_auth)])
     def backfill_progress():
-        from scrapers.page_backfill import PageCheckpointStore
-
-        store = PageCheckpointStore()
-        return {"path": str(store.path), "progress": store._read()}
+        from scrapers.page_backfill import checkpoint_snapshot
+        return checkpoint_snapshot()
 
     @app.get("/api/logs", dependencies=[Depends(require_auth)])
     def tail_logs(file: str = "crawler", lines: int = 200, level: str = "", module: str = ""):

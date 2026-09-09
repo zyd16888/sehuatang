@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
 from scrapers.javbee_scraper import JavbeeScraper
 from scrapers.sources.sehuatang import SehuatangSource
 from util.log_util import log
+from scrapers.infrastructure.file_lock import source_lock
 
 
 SourceRunner = Callable[..., Awaitable[Dict[str, Any]]]
@@ -152,6 +153,16 @@ class SourceRegistry:
         if not acquired:
             yield False
             return
+        process_lock = source_lock(source)
+        try:
+            acquired = process_lock.acquire()
+        except BaseException:
+            lock.release()
+            raise
+        if not acquired:
+            lock.release()
+            yield False
+            return
         with self._activity_lock:
             self._activities[source] = {"source": source, "kind": kind,
                 "description": description, "started_at": time.time(), "running": True}
@@ -160,6 +171,7 @@ class SourceRegistry:
         finally:
             with self._activity_lock:
                 self._activities.pop(source, None)
+            process_lock.release()
             lock.release()
 
     @staticmethod

@@ -9,11 +9,11 @@ sys.path.insert(0, str(ROOT))
 
 from bs4 import BeautifulSoup  # noqa: E402
 
-from scrapers.http_client import HttpClient  # noqa: E402
+from scrapers.http_client import shared_http_client  # noqa: E402
 
 
 def main():
-    client = HttpClient()
+    client = shared_http_client()
     started = time.monotonic()
     body = client.get_html("https://sehuatang.org/forum-103-1.html")
     print(f"list: len={len(body) if body else 0} elapsed={time.monotonic()-started:.2f}s")

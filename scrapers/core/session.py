@@ -1,0 +1,283 @@
+"""通用单会话 HTTP 客户端；生产调用由 SessionPool 固定 worker 持有。"""
+import threading
+import time
+from urllib.parse import urlsplit
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
+from typing import Iterable, List, Optional
+
+from curl_cffi import requests
+
+from scrapers.core.cf_challenge import (
+    FlareSolverrClient,
+    is_cf_challenge,
+    is_rate_limited,
+    merge_solution_cookies,
+)
+from scrapers.core.config import HttpSettings
+from scrapers.core.http import CrawlerHttpClient, redact_url
+from scrapers.core.models import FetchResult
+from util.log_util import log
+from .rate_limit import RateLimitSettings, RequestGate, SiteRateLimited
+
+
+class SessionHttpClient:
+    """实现引擎所需的 fetch/fetch_many 合同，内部处理 CF 挑战。"""
+
+    def __init__(
+        self,
+        settings: HttpSettings,
+        flaresolverr_url: str = "",
+        transport: Optional[CrawlerHttpClient] = None,
+        rate_settings: Optional[RateLimitSettings] = None,
+        source: str = "x1080x",
+        before_request=None,
+    ):
+        if len(settings.proxy.addresses) > 1:
+            raise ValueError("多代理请求必须使用公共 SessionPool")
+        self.settings = settings
+        self.source = source
+        self.log = log.bind(module=source)
+        self.before_request = before_request
+        self.gate = RequestGate(rate_settings or RateLimitSettings(
+            settings.min_interval_seconds, settings.cooldown_seconds, settings.max_cooldown_seconds), logger=self.log)
+        self._cookie: dict = {}
+        self._jar = requests.Cookies()
+        self._cookie_lock = threading.Lock()
+        self._solve_lock = threading.Lock()
+        self._cookie_version = 0
+        self._local = threading.local()
+        self._user_agent = settings.user_agent
+        self._flaresolverr = (
+            FlareSolverrClient(
+                flaresolverr_url,
+                source=source,
+                provider=settings.solver_provider,
+                proxy_url=settings.proxy.url if settings.proxy.enabled else None,
+                raise_on_rate_limit=True,
+            )
+            if flaresolverr_url
+            else None
+        )
+        # 429 进入冷却；有 CF 特征的响应由验证层处理，普通 503 仍可重试。
+        retry = replace(
+            settings.retry,
+            statuses=tuple(
+                status
+                for status in settings.retry.statuses
+                if status != 429
+            ),
+        )
+        self._transport = transport or CrawlerHttpClient(
+            source,
+            replace(settings, retry=retry),
+            request_func=self._request_with_cookies,
+            sleeper=self._sleep,
+        )
+
+    # ---------- 引擎合同 ----------
+
+    def fetch(self, url: str, stage: str = "detail") -> FetchResult:
+        try:
+            self.gate.check()
+            result = self._fetch_once(url, stage)
+        except SiteRateLimited:
+            return FetchResult(url, None, 429, 0, 0,
+                               error_type="rate_limited", error_message="站点正在冷却")
+        if (is_rate_limited(result.body) or result.error_type == "siteratelimited"
+                or (result.status_code == 429 and not is_cf_challenge(result.body, 200))):
+            self.gate.limit()
+            return replace(result, status_code=429, error_type="rate_limited",
+                           error_message="站点请求过于频繁，等待冷却后恢复")
+        if result.ok:
+            self.gate.success()
+        return result
+
+    def wait_for_retry(self):
+        self.gate.wait_for_retry()
+
+    def _fetch_once(self, url: str, stage: str) -> FetchResult:
+        started = time.monotonic()
+        version = self._cookie_version
+        result = self._transport.fetch(url, stage)
+        if (is_rate_limited(result.body) or result.error_type == "siteratelimited"
+                or (result.status_code == 429 and not is_cf_challenge(result.body, 200))):
+            return result
+        if not is_cf_challenge(result.body, result.status_code):
+            return result
+
+        self.log.info(f"触发 CF 挑战: stage={stage} url={redact_url(url)}")
+        try:
+            body, extra_attempts = self._resolve_challenge(url, version)
+        except SiteRateLimited as exc:
+            return FetchResult(url, None, 429,
+                               result.attempts + getattr(exc, "attempts", 0),
+                               int((time.monotonic() - started) * 1000),
+                               error_type="rate_limited", error_message="站点请求过于频繁")
+        if body is not None:
+            return FetchResult(
+                url=url,
+                body=body,
+                status_code=200,
+                attempts=result.attempts + extra_attempts,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+        return FetchResult(
+            url=url,
+            body=None,
+            status_code=result.status_code,
+            attempts=result.attempts + extra_attempts,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            error_type="cf_challenge",
+            error_message="Cloudflare 挑战未通过",
+        )
+
+    def fetch_many(
+        self,
+        urls: Iterable[str],
+        stage: str = "detail",
+    ) -> List[FetchResult]:
+        ordered_urls = list(urls)
+        if not ordered_urls:
+            return []
+        results: List[Optional[FetchResult]] = [None] * len(ordered_urls)
+        worker_count = min(self.settings.concurrency, len(ordered_urls))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = {
+                pool.submit(self.fetch, url, stage): index
+                for index, url in enumerate(ordered_urls)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    results[index] = FetchResult(
+                        url=ordered_urls[index],
+                        body=None,
+                        status_code=None,
+                        attempts=1,
+                        elapsed_ms=0,
+                        error_type=type(exc).__name__.lower(),
+                        error_message=str(exc),
+                    )
+        return [result for result in results if result is not None]
+
+    # ---------- 内部 ----------
+
+    def _request_with_cookies(self, url: str, **kwargs):
+        # 每次真实请求（包括 transport 内部重试）先检查会话和来源的间隔。
+        self.gate.acquire()
+        if self.before_request:
+            self.before_request()
+        headers = dict(kwargs.pop("headers", {}) or {})
+        with self._cookie_lock:
+            headers["User-Agent"] = self._user_agent
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+        session = self._local.session
+        session.cookies.clear()
+        response = session.get(url, cookies=self._jar, headers=headers, **kwargs)
+        if (is_rate_limited(response.content)
+                or (response.status_code == 429 and not is_cf_challenge(response.content, 200))):
+            self.gate.limit(CrawlerHttpClient._retry_after(response))
+        with self._cookie_lock:
+            if hasattr(response.cookies, "jar"):
+                self._jar.update(response.cookies)
+            self._cookie.update(response.cookies.get_dict())
+        return response
+
+    def _cookie_copy(self) -> dict:
+        with self._cookie_lock:
+            return {k: v for k, v in self._cookie.items() if v}
+
+    def _resolve_challenge(self, url: str, version: int):
+        """仅当等待期间验证状态更新，才尝试复用；省掉必然失败的重复直连。"""
+        attempts = 0
+        with self._solve_lock:
+            self.gate.check()
+            if version != self._cookie_version:
+                retry = self._transport.fetch(url, stage="cf_retry")
+                attempts += retry.attempts
+                if (is_rate_limited(retry.body) or retry.error_type == "siteratelimited"
+                        or (retry.status_code == 429 and not is_cf_challenge(retry.body, 200))):
+                    self.gate.limit()
+                    raise SiteRateLimited()
+                if retry.ok and not is_cf_challenge(retry.body, retry.status_code):
+                    return retry.body, attempts
+            body = self._bypass(url)
+            attempts += 1
+            if body is not None:
+                return body, attempts
+            if self._flaresolverr and self._cookie_copy():
+                with self._cookie_lock:
+                    self._cookie.clear()
+                    self._jar.clear()
+                    self._cookie_version += 1
+                self.log.warning("CF 过盾失败，已清空缓存 Cookie 重试")
+                return self._bypass(url), attempts + 1
+            return None, attempts
+
+    def _bypass(self, url: str) -> Optional[bytes]:
+        if self._flaresolverr is None:
+            self.log.warning("未配置 flaresolverr_url，无法自动过 CF")
+            return None
+        started = time.monotonic()
+        self.gate.acquire()
+        if self.before_request:
+            self.before_request()
+        try:
+            solution = self._flaresolverr.solve(url, cookies=self._cookie_copy())
+        except SiteRateLimited as exc:
+            self.gate.limit()
+            exc.attempts = 1
+            raise
+        if solution is None:
+            return None
+        body, cookies, user_agent = solution
+        if is_rate_limited(body):
+            self.gate.limit()
+        with self._cookie_lock:
+            merge_solution_cookies(self._cookie, cookies)
+            if user_agent:
+                self._user_agent = user_agent
+            self._cookie_version += 1
+            self._merge_cookies(cookies, url)
+        self.log.info(
+            "CF 挑战处理完成: "
+            f"url={redact_url(url)} cookies={len(cookies)} "
+            f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
+        )
+        return body
+
+
+    def _merge_cookies(self, cookies, url):
+        from http.cookiejar import Cookie
+        host = urlsplit(url).hostname or ""
+        for item in cookies:
+            name = item.get("name")
+            if not name:
+                continue
+            domain = item.get("domain") or host
+            expires = item.get("expires")
+            expires = int(expires) if expires and expires > 0 else None
+            self._jar.jar.set_cookie(Cookie(0, name, str(item.get("value", "")),
+                None, False, domain, bool(item.get("domain")), domain.startswith("."),
+                item.get("path") or "/", True, bool(item.get("secure")), expires,
+                expires is None, None, None, {}, False))
+
+    def _sleep(self, seconds):
+        from .rate_limit import CrawlStopped
+        if self.gate.stop_event.wait(seconds):
+            raise CrawlStopped()
+
+    def close(self):
+        self.gate.stop_event.set()
+        session = getattr(self._local, "session", None)
+        if session is not None:
+            session.close()
+            del self._local.session
+
+    def get_html(self, url):
+        result = self.fetch(url)
+        return result.body if result.ok else None

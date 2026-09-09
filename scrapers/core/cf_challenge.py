@@ -11,10 +11,14 @@ from curl_cffi import requests
 
 from util.log_util import log
 
-# FlareSolverr/byparr 是单浏览器实例，并发解题会互相干扰
-# （实测 3-4 个并发只有 1-2 个成功，其余内部超时或返回中间态页面）。
-# 进程级全局锁让所有来源/实例的过盾请求串行排队。
-_GLOBAL_SOLVE_LOCK = threading.Lock()
+# 同一个过盾服务实例串行处理，不同端点互不阻塞。
+_SOLVE_LOCKS = {}
+_SOLVE_LOCKS_LOCK = threading.Lock()
+
+
+def solver_lock(endpoint):
+    with _SOLVE_LOCKS_LOCK:
+        return _SOLVE_LOCKS.setdefault(endpoint, threading.Lock())
 
 CF_STATUS = (403, 429, 503)
 _CF_TITLE_KEYWORDS = ("just a moment", "attention required")
@@ -39,8 +43,6 @@ class SiteRateLimited(Exception):
 
 
 def is_cf_challenge(body: Optional[bytes], status: Optional[int]) -> bool:
-    if status in CF_STATUS:
-        return True
     if not body:
         return False
     head = body[:5000]
@@ -73,10 +75,14 @@ class FlareSolverrClient:
         request_timeout: Optional[float] = None,
         raise_on_rate_limit: bool = False,
         source: str = "system",
+        provider: str = "flaresolverr",
     ):
         self.endpoint = endpoint.strip().rstrip("/")
         self.log = log.bind(module=source)
         self.proxy_url = proxy_url or None
+        if provider not in {"byparr", "flaresolverr"}:
+            raise ValueError("未知过盾 provider")
+        self.provider = provider
         self.raise_on_rate_limit = raise_on_rate_limit
         self.max_timeout_ms = int(max_timeout_ms)
         # 未显式指定时跟随解题预算，另留 30s 网络往返余量
@@ -91,7 +97,7 @@ class FlareSolverrClient:
         url: str,
         cookies: Optional[Mapping[str, str]] = None,
     ) -> Optional[tuple[bytes, list, Optional[str]]]:
-        with _GLOBAL_SOLVE_LOCK:
+        with solver_lock(self.endpoint):
             return self._solve_locked(url, cookies)
 
     def _solve_locked(
@@ -108,12 +114,15 @@ class FlareSolverrClient:
                 for name, value in (cookies or {}).items()
             ],
         }
-        if self.proxy_url:
+        headers = {"Content-Type": "application/json"}
+        if self.proxy_url and self.provider == "byparr":
+            headers["X-Proxy-Server"] = self.proxy_url
+        elif self.proxy_url:
             payload["proxy"] = {"url": self.proxy_url}
         try:
             response = requests.post(
                 self.endpoint,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 json=payload,
                 timeout=self.request_timeout,
             )

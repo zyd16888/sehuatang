@@ -67,14 +67,25 @@ class DataManager:
                 progress["candidate_records"] = filtered_data
                 if not dry_run:
                     try:
-                        save_data(filtered_data, fid)
+                        inserted = save_data(filtered_data, fid)
+                        if isinstance(inserted, list):
+                            progress["existing"] += len(filtered_data) - len(inserted)
+                            filtered_data = inserted
                     except BulkWriteError as exc:
-                        # insert_many 默认为 ordered；无写关注错误时 nInserted 是确认成功的前缀。
+                        # ordered 写入的错误前缀已完成；只把 upserted 的记录计为新增。
                         details = exc.details or {}
                         if not details.get("writeConcernErrors"):
-                            inserted = min(len(filtered_data), int(details.get("nInserted", 0)))
-                            progress["saved"] = inserted
-                            progress["saved_records"] = filtered_data[:inserted]
+                            if "nUpserted" in details:
+                                saved_records = [filtered_data[row["index"]] for row in details.get("upserted", [])]
+                                boundary = min((row["index"] for row in details.get("writeErrors", [])),
+                                               default=len(filtered_data))
+                                progress["completed_records"] = filtered_data[:boundary]
+                                progress["confirmed_existing"] = max(0, boundary - len(saved_records))
+                                progress["existing"] += progress["confirmed_existing"]
+                            else:
+                                saved_records = filtered_data[:min(len(filtered_data), int(details.get("nInserted", 0)))]
+                            progress["saved"] = len(saved_records)
+                            progress["saved_records"] = saved_records
                         raise
                     progress["saved"] = len(filtered_data)
                     progress["saved_records"] = filtered_data

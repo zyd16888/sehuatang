@@ -18,5 +18,8 @@ test_*.py
 test.py
 data/backfill_progress.json
 data/crawl_failures.json
+data/page_backfill_progress.json
+data/*.lock
+data/locks/
 scripts/list.txt
 scripts/generated/

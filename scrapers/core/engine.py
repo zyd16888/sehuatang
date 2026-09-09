@@ -66,6 +66,7 @@ class CrawlEngine:
             if retry_failed
             else repository.select_targets(discovery.targets)
         )
+        targets = list({target.key: target for target in targets}.values())
         summary.requested = len(targets)
 
         # 分批抓取并入库：一批抓完立即保存，运行中途被杀
@@ -73,8 +74,14 @@ class CrawlEngine:
         batch_size = max(1, int(batch_size))
         for start in range(0, len(targets), batch_size):
             batch = targets[start:start + batch_size]
-            self._process_batch(context, source, repository, batch, summary)
-            if summary.details.get("rate_limited"):
+            if hasattr(type(self.http), "iter_completed"):
+                for index, result in self.http.iter_completed([target.url for target in batch]):
+                    self._process_batch(context, source, repository, [batch[index]], summary, [result])
+            else:
+                self._process_batch(context, source, repository, batch, summary)
+            if summary.details.get("rate_limited") and (
+                not hasattr(type(self.http), "all_cooling") or self.http.all_cooling
+            ):
                 break
 
         summary.elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -95,10 +102,11 @@ class CrawlEngine:
         repository: RecordRepository,
         targets,
         summary: RunSummary,
+        completed_results=None,
     ) -> None:
         """抓取、解析并保存一批目标，累加进汇总。"""
         logger = log.bind(module=source.name)
-        fetch_results = self.http.fetch_many(
+        fetch_results = completed_results if completed_results is not None else self.http.fetch_many(
             [target.url for target in targets],
             stage="detail",
         )
@@ -192,6 +200,7 @@ class CrawlEngine:
                     "失败台账写入失败: "
                     f"run_id={context.run_id} source={source.name} error={exc}"
                 )
+                raise
         if records and not context.dry_run:
             try:
                 self.failure_store.clear(

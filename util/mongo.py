@@ -1,6 +1,8 @@
 # 连接mongodb
 
 import pymongo
+import threading
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from util.log_util import log
 from util.failure_policy import describe_failure, max_failures, mongo_due_query, mongo_retry_count
@@ -28,6 +30,29 @@ CRAWL_RUN_COLLECTION_NAME = "crawl_runs"
 
 # 运行历史保留 90 天，由 TTL 索引自动清理
 CRAWL_RUN_TTL_SECONDS = 90 * 24 * 3600
+
+_INDEX_LOCK = threading.RLock()
+_READY_INDEXES = set()
+
+
+def _indexes_once(func):
+    @wraps(func)
+    def ensure(collection=None):
+        # 测试替身不缓存；真实集合在本进程中仅初始化一次。
+        if not isinstance(collection, pymongo.collection.Collection):
+            return func(collection)
+        key = (func.__name__, collection.database.client, collection.full_name)
+        with _INDEX_LOCK:
+            if key not in _READY_INDEXES:
+                func(collection)
+                _READY_INDEXES.add(key)
+    return ensure
+
+
+@_indexes_once
+def ensure_sehuatang_indexes(collection):
+    ensure_resource_clock_indexes(collection)
+    collection.create_index([("tid", pymongo.ASCENDING)], unique=True, name="uniq_tid")
 
 
 # 枚举，通过fid获取板块名称
@@ -63,11 +88,16 @@ def save_data(data_list, fid):
     collection_name = get_plate_name(fid)
     collection = db[collection_name]
     if len(data_list) > 0:
-        ensure_resource_clock_indexes(collection)
+        ensure_sehuatang_indexes(collection)
         now = datetime.now(timezone.utc)
-        collection.insert_many([collected_document(item, now) for item in data_list])
-        send_context(data_list, collection_name)
-        log.info("mongo 保存数据成功, 共存入数据库{}条".format(len(data_list)))
+        items = list({str(item["tid"]): {**item, "tid": str(item["tid"])} for item in data_list}.values())
+        result = collection.bulk_write([pymongo.UpdateOne(
+            {"tid": item["tid"]}, {"$setOnInsert": collected_document(item, now)}, upsert=True
+        ) for item in items], ordered=True)
+        inserted = [items[index] for index in result.upserted_ids]
+        send_context(inserted, collection_name)
+        log.info("mongo 保存数据成功, 共存入数据库{}条".format(len(inserted)))
+        return inserted
     else:
         global send_context_str
         send_context_str += "\n " + collection_name + ":\n"
@@ -185,6 +215,7 @@ def get_javbee_collection():
     return db[JAVBEE_COLLECTION_NAME]
 
 
+@_indexes_once
 def ensure_resource_clock_indexes(collection):
     collection.create_index([("collected_at", pymongo.ASCENDING), ("_id", pymongo.ASCENDING)],
                             name="idx_resource_collected")
@@ -192,6 +223,7 @@ def ensure_resource_clock_indexes(collection):
                             name="idx_resource_updated")
 
 
+@_indexes_once
 def ensure_javbee_indexes(collection=None):
     """创建 javbee_items 所需索引；重复调用是安全的。"""
     if collection is None:
@@ -226,7 +258,7 @@ def find_existing_javbee_urls(urls, collection=None):
         collection = get_javbee_collection()
 
     rows = collection.find(
-        {"url": {"$in": list(dict.fromkeys(urls))}},
+        {"url": {"$in": list(dict.fromkeys(urls))}, "resource_collection_pending": {"$ne": True}},
         {"_id": 0, "url": 1},
     )
     return {row["url"] for row in rows if row.get("url")}
@@ -492,6 +524,7 @@ def get_x1080x_collection():
     return db[X1080X_COLLECTION_NAME]
 
 
+@_indexes_once
 def ensure_x1080x_indexes(collection=None):
     """创建 x1080x_items 所需索引；重复调用是安全的。"""
     if collection is None:
@@ -527,7 +560,10 @@ def find_existing_x1080x_keys(source_keys, collection=None):
         collection = get_x1080x_collection()
 
     rows = collection.find(
-        {"source_key": {"$in": list(dict.fromkeys(source_keys))}},
+        {"source_key": {"$in": list(dict.fromkeys(source_keys))},
+         "resource_collection_pending": {"$ne": True},
+         "title": {"$type": "string", "$ne": ""}, "date": {"$type": "string", "$ne": ""},
+         "magnet": {"$type": "string", "$ne": ""}},
         {"_id": 0, "source_key": 1},
     )
     return {row["source_key"] for row in rows if row.get("source_key")}

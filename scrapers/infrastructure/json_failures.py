@@ -1,5 +1,6 @@
 import json
 import threading
+from .file_lock import FileLock
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -23,7 +24,7 @@ class JsonFailureStore:
         failures = list(failures)
         if not failures:
             return
-        with self._lock:
+        with self._lock, FileLock(str(self.path) + ".lock"):
             rows = self._load()
             by_key = {
                 (row["source"], row["source_key"], row["stage"]): row
@@ -60,7 +61,7 @@ class JsonFailureStore:
         key_set = set(keys)
         if not key_set:
             return
-        with self._lock:
+        with self._lock, FileLock(str(self.path) + ".lock"):
             rows = [
                 row
                 for row in self._load()
@@ -73,7 +74,7 @@ class JsonFailureStore:
 
     def due_targets(self, source: str):
         now = datetime.now(timezone.utc)
-        with self._lock:
+        with self._lock, FileLock(str(self.path) + ".lock"):
             rows = self._load()
         targets = []
         seen = set()
@@ -99,7 +100,7 @@ class JsonFailureStore:
     def snapshot(self, source=None, state=None, limit=100):
         now = datetime.now(timezone.utc)
         maximum = max_failures()
-        with self._lock:
+        with self._lock, FileLock(str(self.path) + ".lock"):
             rows = [describe_failure(row, maximum, now) for row in self._load()
                     if not source or row.get("source") == source]
         counts = {name: 0 for name in ("due", "waiting", "exhausted")}
@@ -120,7 +121,7 @@ class JsonFailureStore:
         return self._requeue(source)
 
     def _requeue(self, source, key=None, stage=None):
-        with self._lock:
+        with self._lock, FileLock(str(self.path) + ".lock"):
             rows = self._load()
             count = 0
             now = datetime.now(timezone.utc).isoformat()

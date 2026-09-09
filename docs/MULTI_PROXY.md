@@ -1,0 +1,98 @@
+# 通用多代理会话
+
+Sehuatang、Javbee、x1080x 共用同一套会话池。一个代理地址（含端口）就是一条固定线路；程序不探测公网 IP、不管理 Clash 节点，也不自动切换代理。每个端口对应一个常驻工作线程和 Session，独立保存 Cookie、UA 和冷却状态。无代理时只有一个直连会话。
+
+## 配置
+
+下面是公共默认配置示例，可合并进现有 `crawler` 配置。`sources.<source>` 中的同名字段优先于 `defaults`，因此需同时检查已有来源里的 `proxy.enabled`、`urls`、并发与浏览器设置。
+
+```yaml
+crawler:
+  defaults:
+    concurrency: 2
+    http:
+      timeout: 30
+      impersonate: firefox147
+      proxy:
+        enabled: true
+        urls:
+          - http://proxy-host:17891
+          - http://proxy-host:17892
+    rate_limit:
+      min_interval_seconds: 2
+      site_interval_seconds: 0
+      cooldown_seconds: 60
+      max_cooldown_seconds: 900
+    challenge:
+      provider: byparr
+      flaresolverr_url: http://byparr:8191/v1
+  sources:
+    sehuatang:
+      enabled: true
+      concurrency: 2
+    javbee:
+      enabled: true
+      concurrency: 2
+    x1080x:
+      enabled: true
+      concurrency: 2
+```
+
+| 配置 | 含义 |
+| --- | --- |
+| `http.proxy.urls` | 非空时优先于旧 `url`；重复地址拒绝启动 |
+| `http.proxy.enabled: false` | 使用一个直连会话，不使用代理列表 |
+| `concurrency` | 整个来源的并发上限；有效并发不超过会话数，每个会话串行 |
+| `rate_limit.min_interval_seconds` | 每个会话内列表、详情、HTTP 重试和过盾调用的最小间隔 |
+| `rate_limit.site_interval_seconds` | 来源所有会话共享的额外最小间隔；0 表示不增加间隔 |
+| `cooldown_seconds` / `max_cooldown_seconds` | 限流冷却与指数退避上限；服务端 `Retry-After` 更长时优先遵守服务端 |
+| `challenge.provider` | `byparr` 或 `flaresolverr`，必须与实际部署服务一致 |
+
+以上 2 秒仅为配置示例，不代表已验证的站点阈值。不配置间隔时，x1080x 默认 2 秒，其他来源默认 0 秒。
+
+仍支持旧 `http.proxy.url`、旧配置与 `CRAWLER_<SOURCE>_PROXY_URL`。多代理环境变量为 `CRAWLER_<SOURCE>_PROXY_URLS`，值必须是 JSON 数组，例如 `["http://proxy-host:17891","http://proxy-host:17892"]`。显式环境变量 `PROXY_URL` 会清除继承的列表；同时设置 `PROXY_URLS` 时使用列表。代理开关仍需为 true。
+
+容器中的 `127.0.0.1` 指向容器自身。代理地址必须同时能被采集器和过盾服务访问，且固定端口的出口由运维侧保证。
+
+## CF 与站点验证
+
+Byparr 通过 `X-Proxy-Server` 传代理，FlareSolverr 通过 JSON `proxy.url` 传代理。正文和过盾始终绑定当前会话的代理地址。同一个过盾端点串行执行，不同端点互不阻塞。Cookie 仅保存在内存中，保留 domain/path/expires；程序重启后可能需要重新验证。普通 403/503 不凭状态码判成 CF，需有挑战页面特征。
+
+浏览器指纹应与服务匹配：Byparr 的 Firefox 系列可使用 `firefox147`；FlareSolverr 的 Chrome 服务使用对应的 Chrome 指纹。代码复用过盾响应的 UA，但不会自动推断或切换浏览器指纹。这里复用的是采集器 HTTP Session，不假设 Byparr 支持 FlareSolverr 的持久浏览器 Session API。
+
+Sehuatang 的 R18 `safeid` 转换保留为来源插件，其他来源无需复制。验证未通过的页面不交给正文解析。
+
+## 限流与恢复
+
+一个会话命中限流后独立冷却，其他可用会话仍可执行。增量请求在所有会话冷却时返回 `rate_limited`，不增加单帖失败台账次数。分页/年度补抓由公共 `BackfillHttpClient` 在原会话重试原目标；不换端口、不把同一目标广播到其他代理。
+
+补抓详情按完成顺序解析、保存；一条线路冷却不会拖住其他线路已完成的数据。任务队列按会话数量限制在途量，公共引擎仍按小批次发现详情。停止会唤醒冷却和退避等待，已开始的网络调用受请求超时约束，Session 在拥有它的工作线程中关闭。
+
+## 去重、锁与进度
+
+- 来源运行锁覆盖定时、手动、失败重试、分页补抓和年度补抓。锁位于 `data/locks`，同机不同进程/容器必须共享这个目录。它不是跨机器的分布式租约。锁文件存在不代表正在运行，不要删除正在使用的锁文件。
+- 公共引擎按来源内帖子 key 去重；HTTP 批次重复 URL 共用结果，并发调用合并同一在途请求。不同标题、番号或磁链不作为帖子身份。
+- x1080x/Javbee 使用唯一 `source_key`；尚未完成资源写入的占位记录不会被当成已完成。Sehuatang 在原有分板块集合内使用唯一 `tid` 和 `$setOnInsert`，已存在记录不覆盖。
+- Sehuatang 首次写入会建立 `uniq_tid`；若历史数据已存在重复 tid，索引创建会失败并停止本次保存，程序不会自动清理历史数据。应先只读检查重复记录，再单独处理。
+- 详情失败只有可靠写入失败台账后才允许页进度前移。写库或台账故障会停止当前页；失败台账清理失败可在后续重试，不会丢失数据。
+- 列表页顺序推进，因此不会越过未完成页。已完成记录和失败台账都与代理端口无关，重启后可继续复用。
+- 分页检查点优先存到 MongoDB `crawl_checkpoints`；未启用 MongoDB 时保存在 `data/page_backfill_progress.json`。JSON 检查点与失败台账的整个读改写过程都有跨进程文件锁。
+- 新分页检查点按来源、页区间、站点和排序/板块入口标识隔离，分区分别保存。改变页区间即视为另一个任务。旧无范围 JSON 检查点不自动继承，升级后可以从原范围重扫，已入库帖子会被跳过；旧文件不删除。
+- 年度补抓保留 `data/backfill_progress.json` 中的年份/板块键与旧恢复语义，并加文件锁。它不会迁移到分页检查点。
+- `--dry-run` 不写资源、失败台账或检查点，仍会发起网络请求并使用运行互斥锁。
+
+原有命令不变：
+
+```bash
+python run.py backfill-pages --source x1080x --typeid 5479 --end-page 200 --resume
+python run.py backfill-pages --source sehuatang --fid 103 --end-page 200 --resume
+python run.py crawl --source javbee
+```
+
+Javbee 保留其现有增量/刷新入口；公共会话及恢复包装器可供新的来源/补抓入口复用，未新增 Javbee 的页区间业务命令。
+
+## 验证
+
+离线行为测试：`python -m unittest tests.multi_proxy_tests`；回归：`python -m unittest discover -s tests -p '*tests.py'`。
+
+离线验证不证明真实站点提速。部署后应先对比单端口/双端口的成功新增量、限流比例、过盾频率及资源使用，再调整线路数量和速率。

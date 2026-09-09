@@ -479,7 +479,7 @@ class SehuatangBackfillPagesTests(unittest.TestCase):
         }, {})
         scraper.data_manager.compare_existing_data = lambda *args: ([], [])
         with patch.object(main, "WebScraper", return_value=nullcontext(scraper)), \
-                patch("scrapers.page_backfill.PageCheckpointStore", return_value=self.checkpoints):
+                patch("scrapers.page_backfill.build_checkpoint_store", return_value=self.checkpoints):
             result = asyncio.run(main._backfill_pages("sehuatang", 1, 2000, fids=[103, 104]))
         self.assertTrue(result)
         self.assertEqual([self._url(103, 1), self._url(104, 1), self._url(104, 2)], scraper.http.fetched)

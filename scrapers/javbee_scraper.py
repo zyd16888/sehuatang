@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 from scrapers.core.config import load_source_settings
 from scrapers.core.contracts import NullFailureStore
 from scrapers.core.engine import CrawlEngine
-from scrapers.core.http import CrawlerHttpClient
+from scrapers.core.pool import shared_pool
 from scrapers.core.models import FetchResult
 from scrapers.infrastructure import build_failure_store
 from scrapers.sources.javbee import JavbeeRepository, JavbeeSource
@@ -63,11 +63,11 @@ class JavbeeScraper:
         failure_store=None,
     ):
         self.config = dict(config or get_config("javbee", {}) or {})
-        settings_config = (
-            {"crawler": {"sources": {"javbee": self.config}}}
-            if "http" in self.config or "concurrency" in self.config
-            else {"javbee": self.config}
-        )
+        settings_config = {
+            "javbee": self.config,
+            "crawler": {"defaults": get_config("crawler.defaults", {}) or {},
+                        "sources": {"javbee": self.config}},
+        }
         self.settings = load_source_settings(settings_config, "javbee")
         self.base_url = str(
             self.config.get("base_url", "https://javbee.co")
@@ -90,7 +90,7 @@ class JavbeeScraper:
         self.http = (
             _CallableHttpAdapter(http_get, self.workers)
             if http_get is not None
-            else CrawlerHttpClient("javbee", self.settings)
+            else shared_pool("javbee", self.settings, self.base_url)
         )
         if failure_store is not None:
             self.failure_store = failure_store

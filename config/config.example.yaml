@@ -59,7 +59,16 @@ crawler:
     # 每条失败台账的累计上限，包含首次失败；达到后保留记录并停止重试。
     max_failures: 5
   defaults:
+    # 来源总并发上限；每个固定代理端口内部串行。
     concurrency: 4
+    # 三个来源均支持；来源内相同字段覆盖 defaults。
+    rate_limit:
+      site_interval_seconds: 0
+      cooldown_seconds: 60
+      max_cooldown_seconds: 900
+    challenge:
+      provider: "byparr" # 或 flaresolverr，必须与实际服务匹配
+      flaresolverr_url: ""
     http:
       timeout: 30
       impersonate: "chrome110"
@@ -79,6 +88,9 @@ crawler:
           enabled: true
           # 生产环境建议留空，并使用 CRAWLER_SEHUATANG_PROXY_URL
           url: "http://127.0.0.1:7890"
+          # 非空 urls 优先于 url；同一地址含端口视为一条固定线路，不探测 IP。
+          # 多线路时改成容器和过盾服务都能访问的代理地址。
+          # urls: ["http://proxy-host:17891", "http://proxy-host:17892"]
       challenge:
         # docker 部署配合 byparr 服务时填 http://byparr:8191/v1
         flaresolverr_url: ""
@@ -104,10 +116,10 @@ crawler:
       # 增量抓到新数据时发送 Telegram 推送（沿用 sendMessage 配置；
       # dry-run / retry-failed / 补抓不推送）
       notify_telegram: true
-      # CF 过盾后请求走直连，低并发降低重新触发挑战概率
+      # 来源总并发上限；配置多个端口时可提高到端口数量。
       concurrency: 1
       rate_limit:
-        # 所有列表、详情、HTTP 重试和过盾请求共用最小间隔。
+        # 每个会话内，列表、详情、HTTP 重试和过盾请求共用最小间隔。
         min_interval_seconds: 2
         # 补抓遇限流自动等待，连续受限时冷却翻倍，最多每 15 分钟重试。
         # 不限制限流恢复次数；增量任务停止本轮，等待下次调度。

@@ -1,5 +1,7 @@
 import random
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -112,6 +114,9 @@ class CrawlerHttpClient:
                     last_error_type = "http_status"
                     last_error_message = f"HTTP {last_status}"
                     retryable = last_status in self.settings.retry.statuses
+                    from .cf_challenge import is_cf_challenge
+                    if is_cf_challenge(body, last_status):
+                        retryable = False
                     retry_after = self._retry_after(response)
             except Exception as exc:
                 last_error_type = self._exception_type(exc)
@@ -191,7 +196,13 @@ class CrawlerHttpClient:
         try:
             return max(0.0, float(value))
         except (TypeError, ValueError):
-            return 0.0
+            try:
+                parsed = parsedate_to_datetime(str(value))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
 
     @staticmethod
     def _exception_type(exc: Exception) -> str:
