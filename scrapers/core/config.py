@@ -58,6 +58,7 @@ class HttpSettings:
     site_interval_seconds: float = 0.0
     solver_url: str = ""
     solver_provider: str = "byparr"
+    per_proxy_concurrency: int = 1
 
     def validate(self) -> None:
         if not all(math.isfinite(value) for value in (self.timeout, self.min_interval_seconds,
@@ -71,6 +72,8 @@ class HttpSettings:
             raise ValueError("challenge.provider 只支持 byparr 或 flaresolverr")
         if self.concurrency < 1:
             raise ValueError("concurrency 必须大于等于 1")
+        if type(self.per_proxy_concurrency) is not int or self.per_proxy_concurrency < 1:
+            raise ValueError("per_proxy_concurrency 必须为大于等于 1 的整数")
         if self.timeout <= 0:
             raise ValueError("timeout 必须大于 0")
         if self.retry.attempts < 1:
@@ -153,6 +156,8 @@ def load_source_settings(
     env_override: Dict[str, Any] = {}
     if f"{prefix}CONCURRENCY" in environ:
         env_override["concurrency"] = int(environ[f"{prefix}CONCURRENCY"])
+    if f"{prefix}PER_PROXY_CONCURRENCY" in environ:
+        env_override["per_proxy_concurrency"] = int(environ[f"{prefix}PER_PROXY_CONCURRENCY"])
     http_override: Dict[str, Any] = {}
     if f"{prefix}TIMEOUT" in environ:
         http_override["timeout"] = float(environ[f"{prefix}TIMEOUT"])
@@ -185,6 +190,7 @@ def load_source_settings(
 
     settings = HttpSettings(
         concurrency=int(raw.get("concurrency", 4)),
+        per_proxy_concurrency=raw.get("per_proxy_concurrency", 1),
         timeout=float(http.get("timeout", 30)),
         user_agent=str(http.get("user_agent") or HttpSettings.user_agent),
         impersonate=str(http.get("impersonate") or "chrome110"),

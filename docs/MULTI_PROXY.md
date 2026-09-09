@@ -1,6 +1,6 @@
 # 通用多代理会话
 
-Sehuatang、Javbee、x1080x 共用同一套会话池。一个代理地址（含端口）就是一条固定线路；程序不探测公网 IP、不管理 Clash 节点，也不自动切换代理。每个端口对应一个常驻工作线程和 Session，独立保存 Cookie、UA 和冷却状态。无代理时只有一个直连会话。
+Sehuatang、Javbee、x1080x 共用同一套会话池。一个代理地址（含端口）就是一条固定线路；程序不探测公网 IP、不管理 Clash 节点，也不自动切换代理。每个端口对应一个共享验证上下文，独立保存 Cookie、UA 和冷却状态；可配置多个常驻工作线程，每个线程拥有独立的 HTTP Session。无代理时使用一个直连组，同样受每组并发上限控制。
 
 ## 配置
 
@@ -9,7 +9,8 @@ Sehuatang、Javbee、x1080x 共用同一套会话池。一个代理地址（含�
 ```yaml
 crawler:
   defaults:
-    concurrency: 2
+    concurrency: 4
+    per_proxy_concurrency: 1
     http:
       timeout: 30
       impersonate: firefox147
@@ -18,8 +19,9 @@ crawler:
         urls:
           - http://proxy-host:17891
           - http://proxy-host:17892
+          - http://proxy-host:17893
+          - http://proxy-host:17894
     rate_limit:
-      min_interval_seconds: 2
       site_interval_seconds: 0
       cooldown_seconds: 60
       max_cooldown_seconds: 900
@@ -29,26 +31,42 @@ crawler:
   sources:
     sehuatang:
       enabled: true
-      concurrency: 2
+      concurrency: 12
+      per_proxy_concurrency: 3
+      rate_limit:
+        min_interval_seconds: 0.5
     javbee:
       enabled: true
-      concurrency: 2
+      concurrency: 8
+      per_proxy_concurrency: 2
+      rate_limit:
+        min_interval_seconds: 1
     x1080x:
       enabled: true
-      concurrency: 2
+      concurrency: 4
+      per_proxy_concurrency: 1
+      rate_limit:
+        min_interval_seconds: 2
 ```
 
 | 配置 | 含义 |
 | --- | --- |
 | `http.proxy.urls` | 非空时优先于旧 `url`；重复地址拒绝启动 |
-| `http.proxy.enabled: false` | 使用一个直连会话，不使用代理列表 |
-| `concurrency` | 整个来源的并发上限；有效并发不超过会话数，每个会话串行 |
-| `rate_limit.min_interval_seconds` | 每个会话内列表、详情、HTTP 重试和过盾调用的最小间隔 |
+| `http.proxy.enabled: false` | 使用一个直连组，不使用代理列表；仍受每组并发限制 |
+| `concurrency` | 每个来源的逻辑抓取任务并发上限，不是 Session 数量或每秒速率 |
+| `per_proxy_concurrency` | 同一代理端口内的并发上限；正整数，默认 1 |
+| `rate_limit.min_interval_seconds` | 每个端口的所有 worker 共享的请求启动间隔，覆盖列表、详情、HTTP 重试和过盾 |
 | `rate_limit.site_interval_seconds` | 来源所有会话共享的额外最小间隔；0 表示不增加间隔 |
 | `cooldown_seconds` / `max_cooldown_seconds` | 限流冷却与指数退避上限；服务端 `Retry-After` 更长时优先遵守服务端 |
 | `challenge.provider` | `byparr` 或 `flaresolverr`，必须与实际部署服务一致 |
 
-以上 2 秒仅为配置示例，不代表已验证的站点阈值。不配置间隔时，x1080x 默认 2 秒，其他来源默认 0 秒。
+上述并发和间隔是待实测的起始值，不代表已验证的站点阈值。不配置间隔时，x1080x 默认 2 秒，其他来源默认 0 秒。
+
+有效并发上限为 `min(concurrency, 代理端口数 × per_proxy_concurrency)`。例如 4 个端口、每端口 3、来源总并发 12，最多同时执行 12 个逻辑抓取任务；总并发改成 6 后最多 6 个。无代理时端口数按 1 计算。
+
+来源总额度覆盖一次抓取内的普通重试、过盾及间隔等待；补抓的站点限流冷却在额度外等待。每端口的在途任务不会超过自己的 worker 数。三个站点的额度分别计算；上面配置在三个站点同时运行时合计上限为 24，不是整个应用共享 12。浏览器内部子资源请求不计为独立爬虫任务。
+
+配置新增 `CRAWLER_<SOURCE>_PER_PROXY_CONCURRENCY` 环境变量。未设置该字段的旧配置保持每端口串行。
 
 仍支持旧 `http.proxy.url`、旧配置与 `CRAWLER_<SOURCE>_PROXY_URL`。多代理环境变量为 `CRAWLER_<SOURCE>_PROXY_URLS`，值必须是 JSON 数组，例如 `["http://proxy-host:17891","http://proxy-host:17892"]`。显式环境变量 `PROXY_URL` 会清除继承的列表；同时设置 `PROXY_URLS` 时使用列表。代理开关仍需为 true。
 
@@ -56,7 +74,7 @@ crawler:
 
 ## CF 与站点验证
 
-Byparr 通过 `X-Proxy-Server` 传代理，FlareSolverr 通过 JSON `proxy.url` 传代理。正文和过盾始终绑定当前会话的代理地址。同一个过盾端点串行执行，不同端点互不阻塞。Cookie 仅保存在内存中，保留 domain/path/expires；程序重启后可能需要重新验证。普通 403/503 不凭状态码判成 CF，需有挑战页面特征。
+Byparr 通过 `X-Proxy-Server` 传代理，FlareSolverr 通过 JSON `proxy.url` 传代理。正文和过盾始终绑定当前会话的代理地址。同一个过盾端点串行执行，不同端点互不阻塞。同端口普通请求使用独立 Cookie 快照；新请求在该端口验证期间等待，验证完成后复用最新状态。旧请求带回的 Cookie 不覆盖新一代验证状态。同一批并发 CF 请求也会复用失败的验证结果，后续独立请求仍可重新验证。Cookie 仅保存在内存中，保留 domain/path/expires；程序重启后可能需要重新验证。普通 403/503 不凭状态码判成 CF，需有挑战页面特征。
 
 浏览器指纹应与服务匹配：Byparr 的 Firefox 系列可使用 `firefox147`；FlareSolverr 的 Chrome 服务使用对应的 Chrome 指纹。代码复用过盾响应的 UA，但不会自动推断或切换浏览器指纹。这里复用的是采集器 HTTP Session，不假设 Byparr 支持 FlareSolverr 的持久浏览器 Session API。
 
@@ -64,9 +82,9 @@ Sehuatang 的 R18 `safeid` 转换保留为来源插件，其他来源无需复�
 
 ## 限流与恢复
 
-一个会话命中限流后独立冷却，其他可用会话仍可执行。增量请求在所有会话冷却时返回 `rate_limited`，不增加单帖失败台账次数。分页/年度补抓由公共 `BackfillHttpClient` 在原会话重试原目标；不换端口、不把同一目标广播到其他代理。
+一个端口命中限流后，其所有 worker 共同冷却，其他端口仍可执行。增量请求在所有端口冷却时返回 `rate_limited`，不增加单帖失败台账次数。分页/年度补抓由公共 `BackfillHttpClient` 在原端口的原 worker 重试原目标；不换端口、不把同一目标广播到其他代理。
 
-补抓详情按完成顺序解析、保存；一条线路冷却不会拖住其他线路已完成的数据。任务队列按会话数量限制在途量，公共引擎仍按小批次发现详情。停止会唤醒冷却和退避等待，已开始的网络调用受请求超时约束，Session 在拥有它的工作线程中关闭。
+补抓详情按完成顺序解析、保存；一条线路冷却不会拖住其他线路已完成的数据。任务队列按端口 worker 总数限制在途量，公共引擎仍按小批次发现详情。停止会唤醒冷却和退避等待，已开始的网络调用受请求超时约束，Session 在拥有它的工作线程中关闭。
 
 ## 去重、锁与进度
 

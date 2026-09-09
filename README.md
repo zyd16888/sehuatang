@@ -73,6 +73,7 @@ x1080x:
 crawler:
   defaults:
     concurrency: 4
+    per_proxy_concurrency: 1
     http:
       timeout: 30
       retry:
@@ -83,6 +84,10 @@ crawler:
   sources:
     sehuatang:
       enabled: true
+      concurrency: 12
+      per_proxy_concurrency: 3
+      rate_limit:
+        min_interval_seconds: 0.5
       http:
         proxy:
           enabled: true
@@ -91,7 +96,10 @@ crawler:
         cron: "0 2 * * *"
     javbee:
       enabled: false
-      concurrency: 3
+      concurrency: 8
+      per_proxy_concurrency: 2
+      rate_limit:
+        min_interval_seconds: 1
       http:
         timeout: 60
         proxy:
@@ -104,7 +112,8 @@ crawler:
         cron: "30 2 * * *"
     x1080x:
       enabled: false
-      concurrency: 1
+      concurrency: 4
+      per_proxy_concurrency: 1
       rate_limit:
         min_interval_seconds: 2
         cooldown_seconds: 60
@@ -120,6 +129,7 @@ crawler:
 
 ```text
 CRAWLER_JAVBEE_CONCURRENCY
+CRAWLER_JAVBEE_PER_PROXY_CONCURRENCY
 CRAWLER_JAVBEE_TIMEOUT
 CRAWLER_JAVBEE_PROXY_ENABLED
 CRAWLER_JAVBEE_PROXY_URL
@@ -142,6 +152,8 @@ SHT_WEB_TOKEN
 串值。
 
 三个来源均支持 `crawler.defaults` 与 `crawler.sources.<source>` 合并配置，来源配置优先。
+`concurrency` 控制来源总并发，`per_proxy_concurrency` 控制每端口并发，
+有效上限为两者与端口数共同决定：`min(concurrency, 端口数 × per_proxy_concurrency)`。
 多代理、会话隔离、CF 服务适配、限速和互斥的完整说明见 [通用多代理会话](docs/MULTI_PROXY.md)。
 环境变量需传入容器才会生效，可在 Compose 服务的 `environment` 中配置。
 

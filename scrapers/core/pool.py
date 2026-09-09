@@ -64,9 +64,16 @@ class SessionPool:
             rate_settings=rate, before_request=self._site_gate.acquire,
         ) for url in settings.proxy.addresses]
         for index, lane in enumerate(self.lanes):
-            lane.gate.label = f"session={index}"
-        self._workers = [_SessionWorker(lane, f"{source}-session-{i}")
-                         for i, lane in enumerate(self.lanes)]
+            lane.gate.label = f"proxy_slot={index}"
+        workers_per_proxy = min(settings.per_proxy_concurrency, settings.concurrency)
+        self._worker_lanes = [i for i in range(len(self.lanes)) for _ in range(workers_per_proxy)]
+        self._workers = [_SessionWorker(self.lanes[lane_index], f"{source}-proxy-{lane_index}-worker-{i}")
+                         for i, lane_index in enumerate(self._worker_lanes)]
+        self.lanes[0].log.info(
+            f"HTTP 并发配置: 端口数={len(self.lanes)} "
+            f"来源并发上限={settings.concurrency} 每端口并发上限={settings.per_proxy_concurrency} "
+            f"有效并发上限={min(settings.concurrency, len(self._workers))} "
+            f"每端口请求间隔={settings.min_interval_seconds}s")
 
     def _submit(self, url, stage, recover):
         key = (url, stage, recover)
@@ -76,15 +83,21 @@ class SessionPool:
                     raise CrawlStopped()
                 if key in self._inflight:
                     return self._inflight[key]
-                available = [i for i in range(len(self.lanes)) if i not in self._busy]
-                ready = [i for i in available if not self.lanes[i].gate.blocked()]
+                available = [i for i in range(len(self._workers)) if i not in self._busy]
+                ready = [i for i in available if not self.lanes[self._worker_lanes[i]].gate.blocked()]
                 if ready or (recover and available):
                     choices = ready or available
+                    busy_per_lane = [0] * len(self.lanes)
+                    for i in self._busy:
+                        busy_per_lane[self._worker_lanes[i]] += 1
                     index = min(choices, key=lambda i: (
-                        self.lanes[i].gate.ready_in(), (i - self._cursor) % len(self.lanes)))
-                    self._cursor = (index + 1) % len(self.lanes)
+                        self.lanes[self._worker_lanes[i]].gate.ready_in(),
+                        busy_per_lane[self._worker_lanes[i]],
+                        (self._worker_lanes[i] - self._cursor) % len(self.lanes), i))
+                    lane_index = self._worker_lanes[index]
+                    self._cursor = (lane_index + 1) % len(self.lanes)
                     self._busy.add(index)
-                    future = self._workers[index].submit(self._execute, index, url, stage, recover)
+                    future = self._workers[index].submit(self._execute, lane_index, url, stage, recover)
                     self._inflight[key] = future
                     def release(done, index=index, key=key):
                         with self._condition:
@@ -93,7 +106,7 @@ class SessionPool:
                             self._condition.notify_all()
                     future.add_done_callback(release)
                     return future
-                if not recover and len(available) == len(self.lanes):
+                if not recover and len(available) == len(self._workers):
                     future = Future()
                     future.set_result(FetchResult(url, None, 429, 0, 0,
                                       "rate_limited", "所有会话正在冷却"))
@@ -112,12 +125,12 @@ class SessionPool:
                 result = lane.fetch(url, stage)
             attempts += result.attempts
             elapsed += result.elapsed_ms
-            lane.log.debug(f"HTTP 会话结果: session={index} stage={stage} status={result.status_code} "
+            lane.log.debug(f"HTTP 会话结果: proxy_slot={index} stage={stage} status={result.status_code} "
                            f"attempts={result.attempts} error_type={result.error_type}")
             if not recover or not limited_result(result):
                 return replace(result, attempts=attempts, elapsed_ms=elapsed)
             # 原目标留在原会话中恢复；等待时不占用来源并发额度。
-            lane.log.info(f"补抓会话冷却，等待原目标恢复: session={index} stage={stage}")
+            lane.log.info(f"补抓会话冷却，等待原目标恢复: proxy_slot={index} stage={stage}")
 
     def fetch(self, url, stage="detail"):
         return self._submit(url, stage, False).result()
@@ -126,14 +139,14 @@ class SessionPool:
         return self._submit(url, stage, True).result()
 
     def iter_completed(self, urls, stage="detail", recover=False):
-        # 每批至多一个任务/会话；输入重复 URL 共用一次结果。
+        # 在途任务不超过 worker 容量；输入重复 URL 共用一次结果。
         grouped = {}
         for index, url in enumerate(urls):
             grouped.setdefault(url, []).append(index)
         pending_urls = iter(grouped)
         pending = {}
         def fill():
-            while len(pending) < len(self.lanes):
+            while len(pending) < len(self._workers):
                 url = next(pending_urls, None)
                 if url is None:
                     break

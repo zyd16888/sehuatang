@@ -1,4 +1,5 @@
-"""通用单会话 HTTP 客户端；生产调用由 SessionPool 固定 worker 持有。"""
+"""每端口共享验证状态和限速，HTTP Session 由各常驻 worker 独立持有。"""
+import copy
 import threading
 import time
 from urllib.parse import urlsplit
@@ -44,8 +45,10 @@ class SessionHttpClient:
         self._cookie: dict = {}
         self._jar = requests.Cookies()
         self._cookie_lock = threading.Lock()
-        self._solve_lock = threading.Lock()
+        # 验证中的重试可重入；普通请求仅在取快照/限速时短暂持有，网络调用不持锁。
+        self._solve_lock = threading.RLock()
         self._cookie_version = 0
+        self._failed_validation_version = None
         self._local = threading.local()
         self._user_agent = settings.user_agent
         self._flaresolverr = (
@@ -55,6 +58,7 @@ class SessionHttpClient:
                 provider=settings.solver_provider,
                 proxy_url=settings.proxy.url if settings.proxy.enabled else None,
                 raise_on_rate_limit=True,
+                request_guard=self.gate.check,
             )
             if flaresolverr_url
             else None
@@ -98,8 +102,11 @@ class SessionHttpClient:
 
     def _fetch_once(self, url: str, stage: str) -> FetchResult:
         started = time.monotonic()
-        version = self._cookie_version
+        version = self.validation_version()
+        self._local.request_version = None
         result = self._transport.fetch(url, stage)
+        if self._local.request_version is not None:
+            version = self._local.request_version
         if (is_rate_limited(result.body) or result.error_type == "siteratelimited"
                 or (result.status_code == 429 and not is_cf_challenge(result.body, 200))):
             return result
@@ -167,25 +174,37 @@ class SessionHttpClient:
 
     def _request_with_cookies(self, url: str, **kwargs):
         # 每次真实请求（包括 transport 内部重试）先检查会话和来源的间隔。
-        self.gate.acquire()
-        if self.before_request:
-            self.before_request()
         headers = dict(kwargs.pop("headers", {}) or {})
-        with self._cookie_lock:
-            headers["User-Agent"] = self._user_agent
+        with self._solve_lock:
+            self.gate.acquire()
+            if self.before_request:
+                self.before_request()
+            self.gate.check()
+            with self._cookie_lock:
+                headers["User-Agent"] = self._user_agent
+                version = self._cookie_version
+                cookies = requests.Cookies()
+                for cookie in self._jar.jar:
+                    cookies.jar.set_cookie(copy.deepcopy(cookie))
+            self._local.request_version = version
         if not hasattr(self._local, "session"):
             self._local.session = requests.Session()
         session = self._local.session
         session.cookies.clear()
-        response = session.get(url, cookies=self._jar, headers=headers, **kwargs)
+        response = session.get(url, cookies=cookies, headers=headers, **kwargs)
         if (is_rate_limited(response.content)
                 or (response.status_code == 429 and not is_cf_challenge(response.content, 200))):
             self.gate.limit(CrawlerHttpClient._retry_after(response))
         with self._cookie_lock:
-            if hasattr(response.cookies, "jar"):
-                self._jar.update(response.cookies)
-            self._cookie.update(response.cookies.get_dict())
+            if version == self._cookie_version:
+                if hasattr(response.cookies, "jar"):
+                    self._jar.update(response.cookies)
+                self._cookie.update(response.cookies.get_dict())
         return response
+
+    def validation_version(self):
+        with self._cookie_lock:
+            return self._cookie_version
 
     def _cookie_copy(self) -> dict:
         with self._cookie_lock:
@@ -197,6 +216,9 @@ class SessionHttpClient:
         with self._solve_lock:
             self.gate.check()
             if version != self._cookie_version:
+                # 同一批旧请求复用失败结果，不让每个等待线程再次启动过盾。
+                if self._failed_validation_version == self._cookie_version:
+                    return None, attempts
                 retry = self._transport.fetch(url, stage="cf_retry")
                 attempts += retry.attempts
                 if (is_rate_limited(retry.body) or retry.error_type == "siteratelimited"
@@ -215,7 +237,13 @@ class SessionHttpClient:
                     self._jar.clear()
                     self._cookie_version += 1
                 self.log.warning("CF 过盾失败，已清空缓存 Cookie 重试")
-                return self._bypass(url), attempts + 1
+                body = self._bypass(url)
+                attempts += 1
+                if body is not None:
+                    return body, attempts
+            with self._cookie_lock:
+                self._cookie_version += 1
+                self._failed_validation_version = self._cookie_version
             return None, attempts
 
     def _bypass(self, url: str) -> Optional[bytes]:
@@ -242,6 +270,7 @@ class SessionHttpClient:
             if user_agent:
                 self._user_agent = user_agent
             self._cookie_version += 1
+            self._failed_validation_version = None
             self._merge_cookies(cookies, url)
         self.log.info(
             "CF 挑战处理完成: "

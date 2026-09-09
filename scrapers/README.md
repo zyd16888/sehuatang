@@ -35,7 +35,7 @@ sources/sehuatang      sources/javbee
 
 ## HTTP 与重试
 
-每个来源独立解析 `concurrency`、`http.timeout`、`http.proxy` 和
+每个来源独立解析 `concurrency`、`per_proxy_concurrency`、`http.timeout`、`http.proxy` 和
 `http.retry`。默认只重试连接类异常、空响应以及
 `408/425/429/500/502/503/504`，普通 `4xx` 不重试。退避时间使用指数增长和
 随机抖动，并尊重秒数或 HTTP 日期形式的 `Retry-After`。
@@ -77,7 +77,8 @@ crawler:
 ```
 
 已有配置没有 `rate_limit` 时也采用以上节流和冷却默认值；已有显式并发配置保持生效，
-每个端口内部并发 1；来源总并发可按端口数设置。间隔由公共会话池分别控制，
+每端口并发由 `per_proxy_concurrency` 控制（默认 1），所有 worker 共享该端口的间隔与冷却。
+来源总并发仍由 `concurrency` 限制，不因增加 worker 而改变请求速率额度，
 覆盖列表、详情、HTTP 重试及发起过盾请求。不同进程/容器不共享限流状态，
 同一出口不要同时启动多个补抓实例。上述值是保守起点，不代表站点公布的配额。
 

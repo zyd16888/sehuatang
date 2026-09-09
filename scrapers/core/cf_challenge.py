@@ -76,6 +76,7 @@ class FlareSolverrClient:
         raise_on_rate_limit: bool = False,
         source: str = "system",
         provider: str = "flaresolverr",
+        request_guard=None,
     ):
         self.endpoint = endpoint.strip().rstrip("/")
         self.log = log.bind(module=source)
@@ -83,6 +84,7 @@ class FlareSolverrClient:
         if provider not in {"byparr", "flaresolverr"}:
             raise ValueError("未知过盾 provider")
         self.provider = provider
+        self.request_guard = request_guard
         self.raise_on_rate_limit = raise_on_rate_limit
         self.max_timeout_ms = int(max_timeout_ms)
         # 未显式指定时跟随解题预算，另留 30s 网络往返余量
@@ -98,6 +100,8 @@ class FlareSolverrClient:
         cookies: Optional[Mapping[str, str]] = None,
     ) -> Optional[tuple[bytes, list, Optional[str]]]:
         with solver_lock(self.endpoint):
+            if self.request_guard is not None:
+                self.request_guard()
             return self._solve_locked(url, cookies)
 
     def _solve_locked(

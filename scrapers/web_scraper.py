@@ -449,7 +449,7 @@ class WebScraper:
             self._build_plate_url(fid, page, ordered_by_dateline)
             for page in pages
         ]
-        self.log.info(f"正在批量请求 {len(urls)} 个板块页面（并发 {self.workers}）...")
+        self.log.info(f"正在批量请求 {len(urls)} 个板块页面（来源并发上限 {self.workers}）...")
         if summary is not None:
             summary["list_requested"] += len(urls)
         responses = self._fetch_many(urls)
@@ -627,7 +627,7 @@ class WebScraper:
     ) -> Tuple[List[Dict[str, Any]], int]:
         t0 = time.time()
         urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in info_list]
-        self.log.info(f"正在批量请求 {len(urls)} 个帖子详情页（并发 {self.workers}）...")
+        self.log.info(f"正在批量请求 {len(urls)} 个帖子详情页（来源并发上限 {self.workers}）...")
         rate_urls = set()
         if responses is None:
             info_list = list({str(row["tid"]): row for row in info_list}.values())

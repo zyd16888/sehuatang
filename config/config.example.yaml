@@ -59,8 +59,10 @@ crawler:
     # 每条失败台账的累计上限，包含首次失败；达到后保留记录并停止重试。
     max_failures: 5
   defaults:
-    # 来源总并发上限；每个固定代理端口内部串行。
+    # 来源逻辑抓取任务总并发上限，不是端口数或每秒请求数。
     concurrency: 4
+    # 每个固定代理端口的并发上限；省略时为 1，兼容旧配置。
+    per_proxy_concurrency: 1
     # 三个来源均支持；来源内相同字段覆盖 defaults。
     rate_limit:
       site_interval_seconds: 0
@@ -81,7 +83,10 @@ crawler:
   sources:
     sehuatang:
       enabled: true
-      concurrency: 6
+      concurrency: 12
+      per_proxy_concurrency: 3
+      rate_limit:
+        min_interval_seconds: 0.5
       http:
         timeout: 30
         proxy:
@@ -98,7 +103,10 @@ crawler:
         cron: "0 2 * * *"
     javbee:
       enabled: false
-      concurrency: 3
+      concurrency: 8
+      per_proxy_concurrency: 2
+      rate_limit:
+        min_interval_seconds: 1
       http:
         # JavBee 偶发 20 秒以上无首字节，使用更宽松的来源级超时。
         timeout: 60
@@ -116,10 +124,11 @@ crawler:
       # 增量抓到新数据时发送 Telegram 推送（沿用 sendMessage 配置；
       # dry-run / retry-failed / 补抓不推送）
       notify_telegram: true
-      # 来源总并发上限；配置多个端口时可提高到端口数量。
-      concurrency: 1
+      # 下列值对应 4 个代理端口；无代理时只使用一个直连组。
+      concurrency: 4
+      per_proxy_concurrency: 1
       rate_limit:
-        # 每个会话内，列表、详情、HTTP 重试和过盾请求共用最小间隔。
+        # 同端口所有 worker 的列表、详情、HTTP 重试和过盾共用最小间隔。
         min_interval_seconds: 2
         # 补抓遇限流自动等待，连续受限时冷却翻倍，最多每 15 分钟重试。
         # 不限制限流恢复次数；增量任务停止本轮，等待下次调度。

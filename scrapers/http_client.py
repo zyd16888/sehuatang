@@ -28,17 +28,23 @@ class HttpClient(SessionHttpClient):
                                      for key, value in self._initial_cookies.items()], url)
                 self._cookie.update(self._initial_cookies)
                 self._initial_cookies.clear()
+        version = self.validation_version()
         result = super()._fetch_once(url, stage)
         attempts, elapsed = result.attempts, result.elapsed_ms
         for _ in range(3):
             if not result.ok or not self._is_r18_block(result.body):
                 return replace(result, attempts=attempts, elapsed_ms=elapsed)
             match = _SAFEID_RE.search(result.body.decode("utf-8", errors="ignore"))
-            with self._cookie_lock:
-                self._cookie["_safe"] = match.group(1)
-                self._merge_cookies([{"name": "_safe", "value": match.group(1)}], url)
-                self._cookie_version += 1
-            result = super()._fetch_once(url, "r18_retry")
+            with self._solve_lock:
+                if version == self.validation_version():
+                    with self._cookie_lock:
+                        self._cookie["_safe"] = match.group(1)
+                        self._merge_cookies([{"name": "_safe", "value": match.group(1)}], url)
+                        self._cookie_version += 1
+                        self._failed_validation_version = None
+                # 等待期间其他线程已完成 R18/CF 时，先使用最新状态重试。
+                version = self.validation_version()
+                result = super()._fetch_once(url, "r18_retry")
             attempts += result.attempts
             elapsed += result.elapsed_ms
         if self._is_r18_block(result.body):
