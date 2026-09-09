@@ -113,4 +113,6 @@ Javbee 保留其现有增量/刷新入口；公共会话及恢复包装器可供
 
 离线行为测试：`python -m unittest tests.multi_proxy_tests`；回归：`python -m unittest discover -s tests -p '*tests.py'`。
 
+检查点列表的页面逻辑回归：`node --test tests/backfill_progress_ui_tests.mjs`，覆盖新旧键与按来源筛选。
+
 离线验证不证明真实站点提速。部署后应先对比单端口/双端口的成功新增量、限流比例、过盾频率及资源使用，再调整线路数量和速率。
