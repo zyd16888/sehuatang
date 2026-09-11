@@ -29,6 +29,7 @@ def main():
         "tests.javbee_tests", "tests.backfill_tests", "tests.mongo_recovery_tests",
         "tests.notification_tests",
         "tests.sehuatang_run_tests",
+        "tests.network_monitor_tests",
     ]
     try:
         suite = unittest.defaultTestLoader.loadTestsFromNames(names)

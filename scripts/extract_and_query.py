@@ -6,24 +6,43 @@
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 # ==================== 配置区 ====================
 SCRIPT_DIR = Path(__file__).resolve().parent
 INPUT_FILE = SCRIPT_DIR / "list.txt"
 OUTPUT_DIR = SCRIPT_DIR / "generated"
+
+
+@dataclass(frozen=True)
+class CollectionSpec:
+    name: str
+    source_type: str
+    number_field: str = "number"
+    date_field: str = "post_time"
+    normalized_number_field: str | None = None
+
+
 COLLECTIONS = [
-    ("hd_chinese_subtitles", "subtitle"),
-    ("asia_codeless_originate", "uncensored"),
-    ("EU_US_no_mosaic", "uncensored"),
-    ("vegan_with_mosaic", "regular"),
-    ("asia_mosaic_originate", "regular"),
-    ("anime_originate", "regular"),
-    ("vr_video", "regular"),
-    ("4k_video", "regular"),
-    ("domestic_original", "regular"),
-    ("three_levels_photo", "regular"),
-    ("korean_anchorman", "regular"),
+    CollectionSpec("hd_chinese_subtitles", "subtitle"),
+    CollectionSpec("asia_codeless_originate", "uncensored"),
+    CollectionSpec("EU_US_no_mosaic", "uncensored"),
+    CollectionSpec("vegan_with_mosaic", "regular"),
+    CollectionSpec("asia_mosaic_originate", "regular"),
+    CollectionSpec("anime_originate", "regular"),
+    CollectionSpec("vr_video", "regular"),
+    CollectionSpec("4k_video", "regular"),
+    CollectionSpec("domestic_original", "regular"),
+    CollectionSpec("three_levels_photo", "regular"),
+    CollectionSpec("korean_anchorman", "regular"),
+    CollectionSpec(
+        "javbee_items",
+        "regular",
+        number_field="code",
+        date_field="date",
+        normalized_number_field="code_normalized",
+    ),
 ]
 # subtitle/uncensored 由来源 collection 决定；regular 中标题含“破解”时升级为 cracked。
 # ================================================
@@ -52,7 +71,7 @@ def extract_numbers(text: str) -> list[str]:
 
 def generate_priority_query(
     numbers: list[str],
-    collections: list[tuple[str, str]],
+    collections: list[CollectionSpec],
 ) -> str:
     """生成跨集合查询，保留中文字幕和无码，缺失时再降级。"""
     if not numbers:
@@ -61,45 +80,91 @@ def generate_priority_query(
         return "// 没有配置任何 MongoDB collection"
 
     valid_source_types = {"subtitle", "uncensored", "regular"}
-    collection_names = [name for name, _ in collections]
+    collection_names = [spec.name for spec in collections]
     if len(collection_names) != len(set(collection_names)):
         raise ValueError("COLLECTIONS 中存在重复的 collection")
-    for collection, source_type in collections:
-        if not collection:
+    for spec in collections:
+        if not spec.name:
             raise ValueError("collection 名称不能为空")
-        if source_type not in valid_source_types:
+        if spec.source_type not in valid_source_types:
             raise ValueError(
-                f"collection {collection} 的类型 {source_type} 不受支持"
+                f"collection {spec.name} 的类型 {spec.source_type} 不受支持"
             )
+        if not spec.number_field or not spec.date_field:
+            raise ValueError(f"collection {spec.name} 的字段配置不能为空")
 
-    # 生成 $or 条件
-    or_conditions = []
-    for n in numbers:
-        parts = re.split(r"[- ]", n, maxsplit=1)
-        if len(parts) == 2:
-            prefix, num = parts
-            regex = f'"^{prefix}[- ]?{num}"'
-        else:
-            regex = f'"^{n}"'
-        or_conditions.append(f'        {{ number: {{ $regex: {regex}, $options: "i" }} }}')
+    def render_number_match(spec: CollectionSpec) -> str:
+        conditions = []
+        if spec.normalized_number_field:
+            normalized_numbers = [re.sub(r"[^A-Z0-9]", "", n.upper()) for n in numbers]
+            field_js = json.dumps(spec.normalized_number_field, ensure_ascii=False)
+            values_js = json.dumps(normalized_numbers, ensure_ascii=False)
+            conditions.append(f'    {{ {field_js}: {{ $in: {values_js} }} }}')
 
-    or_body = ",\n".join(or_conditions)
+        field_js = json.dumps(spec.number_field, ensure_ascii=False)
+        for number in numbers:
+            parts = re.split(r"[- ]", number, maxsplit=1)
+            if len(parts) == 2:
+                prefix, suffix = parts
+                regex = f'"^{prefix}[- ]?{suffix}"'
+            else:
+                regex = f'"^{number}"'
+            conditions.append(
+                f'    {{ {field_js}: {{ $regex: {regex}, $options: "i" }} }}'
+            )
+        return "{\n  $or: [\n" + ",\n".join(conditions) + "\n  ]\n}"
 
-    first_collection, first_source_type = collections[0]
+    match_variables = []
+    match_declarations = []
+    match_variable_by_fields = {}
+    for spec in collections:
+        fields = (spec.number_field, spec.normalized_number_field)
+        variable_name = match_variable_by_fields.get(fields)
+        if variable_name is None:
+            variable_name = f"numberMatch{len(match_variable_by_fields) + 1}"
+            match_variable_by_fields[fields] = variable_name
+            match_declarations.append(
+                f"const {variable_name} = {render_number_match(spec)};"
+            )
+        match_variables.append(variable_name)
+
+    first_spec = collections[0]
+
+    def render_canonical_fields(spec: CollectionSpec, indent: str) -> list[str]:
+        fields = []
+        if spec.number_field != "number":
+            source = f'"${spec.number_field}"'
+            if spec.normalized_number_field:
+                source = (
+                    f'{{ $ifNull: ["${spec.number_field}", '
+                    f'"${spec.normalized_number_field}"] }}'
+                )
+            fields.append(f"{indent}number: {source}")
+        if spec.date_field != "post_time":
+            fields.append(f'{indent}post_time: "${spec.date_field}"')
+        return fields
+
     union_stages = []
-    for collection, source_type in collections[1:]:
-        collection_js = json.dumps(collection, ensure_ascii=False)
-        source_type_js = json.dumps(source_type, ensure_ascii=False)
+    for spec, match_variable in zip(collections[1:], match_variables[1:]):
+        collection_js = json.dumps(spec.name, ensure_ascii=False)
+        source_type_js = json.dumps(spec.source_type, ensure_ascii=False)
+        add_fields = render_canonical_fields(spec, "            ")
+        add_fields.extend(
+            [
+                f"            source_collection: {collection_js}",
+                f"            source_type: {source_type_js}",
+            ]
+        )
+        add_fields_js = ",\n".join(add_fields)
         union_stages.append(
             f"""  {{
     $unionWith: {{
       coll: {collection_js},
       pipeline: [
-        {{ $match: numberMatch }},
+        {{ $match: {match_variable} }},
         {{
           $addFields: {{
-            source_collection: {collection_js},
-            source_type: {source_type_js}
+{add_fields_js}
           }}
         }}
       ]
@@ -111,23 +176,27 @@ def generate_priority_query(
     if union_body:
         union_body += ",\n"
 
-    first_collection_js = json.dumps(first_collection, ensure_ascii=False)
-    first_source_type_js = json.dumps(first_source_type, ensure_ascii=False)
+    first_collection_js = json.dumps(first_spec.name, ensure_ascii=False)
+    first_source_type_js = json.dumps(first_spec.source_type, ensure_ascii=False)
+    match_declarations_js = "\n\n".join(match_declarations)
+    first_add_fields = render_canonical_fields(first_spec, "      ")
+    first_add_fields.extend(
+        [
+            f"      source_collection: {first_collection_js}",
+            f"      source_type: {first_source_type_js}",
+        ]
+    )
+    first_add_fields_js = ",\n".join(first_add_fields)
 
     query = f"""// 需要 MongoDB 4.4+（使用 $unionWith）
-const numberMatch = {{
-  $or: [
-{or_body}
-  ]
-}};
+{match_declarations_js}
 
 db.getCollection({first_collection_js}).aggregate([
   // 1. 每个 collection 先过滤目标番号，再合并结果
-  {{ $match: numberMatch }},
+  {{ $match: {match_variables[0]} }},
   {{
     $addFields: {{
-      source_collection: {first_collection_js},
-      source_type: {first_source_type_js}
+{first_add_fields_js}
     }}
   }},
 {union_body}

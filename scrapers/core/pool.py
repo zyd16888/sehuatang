@@ -2,6 +2,7 @@
 import atexit
 import threading
 import queue
+import time
 from concurrent.futures import Future, wait, FIRST_COMPLETED
 from dataclasses import replace
 from urllib.parse import urlsplit
@@ -10,6 +11,7 @@ from .config import ProxySettings
 from .models import FetchResult
 from .rate_limit import CrawlStopped, RateLimitSettings, RequestGate, limited_result
 from .session import SessionHttpClient
+from .network import NetworkMonitor, WINDOW_SECONDS
 
 
 class _SessionWorker:
@@ -56,6 +58,8 @@ class SessionPool:
         self._inflight = {}
         self._busy = set()
         self._cursor = 0
+        self._waiting = 0
+        self._probe_stop = threading.Event()
         self._slots = threading.BoundedSemaphore(settings.concurrency)
         rate = RateLimitSettings(settings.min_interval_seconds,
                                  settings.cooldown_seconds, settings.max_cooldown_seconds)
@@ -76,8 +80,19 @@ class SessionPool:
             f"来源并发上限={settings.concurrency} 每端口并发上限={settings.per_proxy_concurrency} "
             f"有效并发上限={min(settings.concurrency, len(self._workers))} "
             f"每端口请求间隔={settings.min_interval_seconds}s")
+        self._probe_thread = threading.Thread(target=self._diagnostics, name=f"{source}-network", daemon=True)
+        self._probe_thread.start()
 
     def _submit(self, url, stage, recover, cancel_event=None):
+        with self._condition:
+            self._waiting += 1
+        try:
+            return self._submit_request(url, stage, recover, cancel_event)
+        finally:
+            with self._condition:
+                self._waiting -= 1
+
+    def _submit_request(self, url, stage, recover, cancel_event=None):
         key = (url, stage, recover, cancel_event)
         with self._condition:
             while True:
@@ -126,15 +141,50 @@ class SessionPool:
             with self._slots:
                 if self._closed or (cancel_event is not None and cancel_event.is_set()):
                     raise CrawlStopped()
+                request_started = time.monotonic()
                 result = lane.fetch(url, stage)
             attempts += result.attempts
             elapsed += result.elapsed_ms
             lane.log.debug(f"HTTP 会话结果: proxy_slot={index} stage={stage} status={result.status_code} "
                            f"attempts={result.attempts} error_type={result.error_type}")
             if not recover or not limited_result(result):
+                if result.attempts and isinstance(getattr(lane, "network", None), NetworkMonitor):
+                    lane.network.completed(url, result.ok, request_started, result.error_type)
                 return replace(result, attempts=attempts, elapsed_ms=elapsed)
             # 原目标留在原会话中恢复；等待时不占用来源并发额度。
             lane.log.info(f"补抓会话冷却，等待原目标恢复: proxy_slot={index} stage={stage}")
+
+    def _diagnostics(self):
+        while not self._probe_stop.wait(1):
+            self._dispatch_diagnostics()
+
+    def _dispatch_diagnostics(self):
+        with self._condition:
+            if self._closed or self._waiting:
+                return
+            for lane_index, lane in enumerate(self.lanes):
+                if not isinstance(getattr(lane, "network", None), NetworkMonitor):
+                    continue
+                if lane.gate.blocked() or any(self._worker_lanes[i] == lane_index for i in self._busy):
+                    continue
+                claim = lane.network.claim_probe()
+                if not claim:
+                    continue
+                index = self._worker_lanes.index(lane_index)
+                self._busy.add(index)
+                future = self._workers[index].submit(self._probe, lane, claim)
+                def release(done, index=index):
+                    with self._condition:
+                        self._busy.discard(index)
+                        self._condition.notify_all()
+                future.add_done_callback(release)
+
+    def _probe(self, lane, claim):
+        with self._slots:
+            if self._closed:
+                lane.network.finish_probe(*claim)
+                return
+            lane.probe_network(*claim)
 
     def fetch(self, url, stage="detail"):
         return self._submit(url, stage, False).result()
@@ -194,10 +244,12 @@ class SessionPool:
             if self._closed:
                 return
             self._closed = True
+            self._probe_stop.set()
             self._site_gate.stop_event.set()
             for lane in self.lanes:
                 lane.gate.stop_event.set()
             self._condition.notify_all()
+        self._probe_thread.join()
         # close 在创建 Session 的同一常驻线程中执行。
         for worker in self._workers:
             worker.shutdown()
@@ -205,6 +257,20 @@ class SessionPool:
 
 _POOLS = {}
 _LOCK = threading.Lock()
+
+
+def network_snapshot():
+    with _LOCK:
+        pools = list(_POOLS.values())
+    rows = []
+    for pool in pools:
+        for index, lane in enumerate(pool.lanes):
+            if not isinstance(getattr(lane, "network", None), NetworkMonitor):
+                continue
+            entries = lane.network.snapshot() or [dict(source=pool.source, proxy=lane.network.proxy,
+                                                      target=None, state="stale")]
+            rows.extend(dict(entry, proxy_slot=index) for entry in entries)
+    return {"window_seconds": WINDOW_SECONDS, "lines": rows}
 
 
 def shared_pool(source, settings, base_url, *, session_factory=SessionHttpClient, identity=None):

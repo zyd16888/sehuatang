@@ -663,6 +663,15 @@
       .toast.error {
         background: var(--red);
       }
+      .network-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; }
+      .network-card { border: 1px solid var(--line); border-radius: 12px; padding: 20px; min-width: 0; }
+      .network-top { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+      .network-top h3 { margin: 0; font-size: 15px; }
+      .network-address { margin: 12px 0; overflow-wrap: anywhere; font-size: 13px; }
+      .network-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 18px 0; }
+      .network-stats dt { font-size: 12px; color: var(--muted); }
+      .network-stats dd { margin: 4px 0 0; font-size: 20px; font-variant-numeric: tabular-nums; }
+      .network-detail { border-top: 1px solid var(--line); padding-top: 12px; overflow-wrap: anywhere; }
       @media (min-width: 1500px) {
         main {
           padding-top: 42px;
@@ -898,6 +907,16 @@
               日志
             </button>
             <button
+              id="tab-network"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-network"
+              tabindex="-1"
+              data-tab="network"
+            >
+              线路监测
+            </button>
+            <button
               id="tab-config"
               role="tab"
               aria-selected="false"
@@ -910,6 +929,29 @@
           </div>
           <button id="refreshButton" aria-label="刷新当前面板">↻ 刷新</button>
         </div>
+        <section
+          class="panel"
+          id="panel-network"
+          role="tabpanel"
+          aria-labelledby="tab-network"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>线路监测</h2>
+              <p class="hint">最近 5 分钟的实际请求；异常线路空闲后自动诊断。</p>
+            </div>
+            <select id="networkSource" aria-label="线路监测来源">
+              <option value="">全部来源</option>
+              <option value="sehuatang">sehuatang</option>
+              <option value="javbee">javbee</option>
+              <option value="x1080x">x1080x</option>
+            </select>
+          </div>
+          <p class="hint" id="networkNote" role="status" aria-live="polite">正在读取线路状态…</p>
+          <div id="networkLines" class="network-grid"></div>
+          <p class="hint">请求次数包含重试；最终失败按抓取结果统计，诊断请求不计入。数据仅属于当前进程，重启后重新采样。</p>
+        </section>
         <section
           class="panel"
           id="panel-runs"
@@ -1381,6 +1423,41 @@
           .join("");
         tick();
       }
+      async function refreshNetwork() {
+        const seq = ++panelRequest;
+        let data;
+        try { data = await api("/api/network"); }
+        catch (error) {
+          if (seq === panelRequest) {
+            $("networkNote").textContent = "线路状态读取失败，当前数据无法确认，请刷新重试。";
+            $("networkLines").innerHTML = "";
+          }
+          throw error;
+        }
+        if (seq !== panelRequest) return;
+        const rows = (data.lines || []).filter(row => !$("networkSource").value || row.source === $("networkSource").value);
+        const states = {
+          healthy: ["正常", "ok"], unstable: ["偶发网络异常", "due"],
+          suspect: ["疑似异常", "failed"], diagnosing: ["诊断中", "running"],
+          recovered: ["已恢复", "ok"], stale: ["暂无近期数据", ""],
+          restricted: ["目标访问受限", "due"], challenge: ["需要站点验证", "due"],
+          proxy_auth: ["代理认证失败", "failed"], response_error: ["目标响应异常", "due"],
+        };
+        const outcomes = {ok: "原线路已能访问目标页面", network_error: "原线路访问目标仍有网络异常", deferred: "诊断暂缓，等待站点冷却", restricted: "目标站返回访问限制", challenge: "目标站返回验证页面", proxy_auth: "代理认证失败", response_error: "目标站返回异常响应"};
+        const evidence = {proxy_unreachable: "爬虫无法连接代理端口，请检查代理服务或容器网络。", target_path: "同线路测试地址可达，异常集中在目标站访问路径。", undetermined: "测试地址也未验证成功，暂无法区分线路与目标站故障。", deferred: "补充诊断暂缓，等待站点冷却。"};
+        const stamp = value => value == null ? "—" : fmtTime(new Date(value * 1000));
+        $("networkNote").textContent = rows.length ? `共 ${rows.length} 条线路记录 · 同一端口访问不同站点分别统计` : "暂无线路记录，开始采集后会自动显示；尚未发起请求不代表线路正常。";
+        $("networkLines").innerHTML = rows.map(row => {
+          const [label, tone] = states[row.state] || ["状态未知", ""];
+          const diagnosis = row.diagnostic;
+          return `<article class="network-card"><div class="network-top"><h3>${esc(row.source)}</h3><span class="badge ${tone}">${label}</span></div>
+            <div class="network-address">${esc(row.proxy === "direct" ? "直连" : row.proxy)}<br><span class="hint">${esc(row.target || "等待首次请求")}</span></div>
+            <dl class="network-stats"><div><dt>请求 / 重试</dt><dd>${Number(row.attempts || 0)} / ${Number(row.retries || 0)}</dd></div><div><dt>超时率</dt><dd>${row.timeout_rate == null ? "—" : (row.timeout_rate * 100).toFixed(1) + "%"}</dd></div><div><dt>平均耗时</dt><dd>${row.average_ms == null ? "—" : (row.average_ms / 1000).toFixed(2) + "s"}</dd></div></dl>
+            <div class="network-detail hint">最终失败 ${Number(row.failed || 0)} / 已完成 ${Number(row.completed || 0)} · 连续网络失败 ${Number(row.consecutive_failures || 0)}<br>最后成功 ${stamp(row.last_success)}<br>最后请求 ${stamp(row.last_attempt)}
+            ${row.last_error ? `<p>${esc(row.last_error.summary)}<br>curl ${esc(row.last_error.curl_code ?? "—")} · ${esc(row.last_error.phase)}</p>` : ""}
+            ${diagnosis ? `<p>最近诊断 ${stamp(diagnosis.at)}<br>${esc(outcomes[diagnosis.outcome] || "证据不足")}${diagnosis.status ? ` · HTTP ${Number(diagnosis.status)}` : ""}${diagnosis.evidence ? `<br>${esc(evidence[diagnosis.evidence] || "证据不足")}` : ""}</p>` : ""}</div></article>`;
+        }).join("");
+      }
       async function refreshRuns() {
         const seq = ++panelRequest;
         const params = new URLSearchParams({
@@ -1535,6 +1612,7 @@
         else if (activeTab === "notifications") await refreshNotifications();
         else if (activeTab === "backfill") await refreshBackfill();
         else if (activeTab === "logs") await refreshLogs();
+        else if (activeTab === "network") await refreshNetwork();
         else if (!configLoaded) await loadConfig();
       }
       async function switchTab(name) {
@@ -1669,6 +1747,7 @@
         );
       for (const id of [
         "runSource",
+        "networkSource",
         "runLimit",
         "failureSource",
         "failureState",

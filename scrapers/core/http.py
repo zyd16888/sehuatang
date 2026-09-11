@@ -13,6 +13,7 @@ from util.log_util import log
 
 from .config import HttpSettings
 from .models import FetchResult
+from .network import exception_info, proxy_label
 
 
 _SENSITIVE_QUERY_KEYS = {
@@ -57,6 +58,8 @@ class CrawlerHttpClient:
         sleeper: Callable[[float], None] = time.sleep,
         random_uniform: Callable[[float, float], float] = random.uniform,
         monotonic: Callable[[], float] = time.monotonic,
+        attempt_observer=None,
+        request_timing=None,
     ):
         settings.validate()
         self.source = source
@@ -66,6 +69,8 @@ class CrawlerHttpClient:
         self._sleeper = sleeper
         self._random_uniform = random_uniform
         self._monotonic = monotonic
+        self._attempt_observer = attempt_observer
+        self._request_timing = request_timing
 
     @property
     def proxies(self):
@@ -85,6 +90,9 @@ class CrawlerHttpClient:
 
         for attempt in range(1, self.settings.retry.attempts + 1):
             retry_after = 0.0
+            attempt_started = self._monotonic()
+            last_status = last_body = last_error_type = last_error_message = None
+            error = None
             try:
                 response = self._request_func(
                     url,
@@ -121,12 +129,27 @@ class CrawlerHttpClient:
             except Exception as exc:
                 last_error_type = self._exception_type(exc)
                 last_error_message = str(exc)
+                error = exception_info(exc)
                 retryable = isinstance(
                     exc,
                     (RequestException, TimeoutError, ConnectionError),
                 )
+            finally:
+                timing = (self._request_timing() if self._request_timing else
+                          (attempt_started, self._elapsed_ms(attempt_started)))
+                attempt_ms = timing[1] if timing else 0
+                if timing and self._attempt_observer:
+                    self._attempt_observer(url, started=timing[0], elapsed_ms=attempt_ms,
+                                           status=last_status, body=last_body,
+                                           retry=attempt > 1, error=error)
 
             if not retryable or attempt >= self.settings.retry.attempts:
+                if error:
+                    self.log.warning(f"HTTP 请求最终失败: source={self.source} stage={stage} "
+                                     f"proxy={proxy_label(self.settings.proxy.url if self.settings.proxy.enabled else '')} "
+                                     f"attempt={attempt}/{self.settings.retry.attempts} elapsed_ms={attempt_ms} "
+                                     f"error_type={last_error_type} curl_code={error['curl_code']} "
+                                     f"phase={error['phase']} error={error['summary']} url={redact_url(url)}")
                 break
 
             delay = max(self._retry_delay(attempt), retry_after)
@@ -135,6 +158,10 @@ class CrawlerHttpClient:
                 f"source={self.source} stage={stage} "
                 f"attempt={attempt}/{self.settings.retry.attempts} "
                 f"delay={delay:.2f}s status={last_status} "
+                f"proxy={proxy_label(self.settings.proxy.url if self.settings.proxy.enabled else '')} "
+                f"elapsed_ms={attempt_ms} curl_code={error['curl_code'] if error else None} "
+                f"phase={error['phase'] if error else 'response'} "
+                f"error={error['summary'] if error else last_error_message} "
                 f"error_type={last_error_type} url={redact_url(url)}"
             )
             self._sleeper(delay)
@@ -206,16 +233,7 @@ class CrawlerHttpClient:
 
     @staticmethod
     def _exception_type(exc: Exception) -> str:
-        name = type(exc).__name__.lower()
-        if "timeout" in name or "timed out" in str(exc).lower():
-            return "timeout"
-        if "proxy" in name:
-            return "proxy"
-        if "dns" in name:
-            return "dns"
-        if "connection" in name:
-            return "connection"
-        return name or "request_error"
+        return exception_info(exc)["error_type"]
 
     def _elapsed_ms(self, started: float) -> int:
         return max(0, int((self._monotonic() - started) * 1000))

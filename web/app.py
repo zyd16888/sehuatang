@@ -208,6 +208,11 @@ def create_app(
             "server_time": datetime.now(timezone.utc).isoformat(),
         }
 
+    @app.get("/api/network", dependencies=[Depends(require_auth)])
+    def network_status():
+        from scrapers.core.pool import network_snapshot
+        return network_snapshot()
+
     @app.get("/api/notifications", dependencies=[Depends(require_auth)])
     def notification_status():
         from notifications.memory_queue import get_notification_queue

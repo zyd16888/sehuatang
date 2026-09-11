@@ -2,19 +2,35 @@ import unittest
 
 from scripts.extract_and_query import (
     COLLECTIONS,
+    CollectionSpec,
     generate_priority_query,
 )
 
 
 class MultiCollectionQueryTests(unittest.TestCase):
     def test_configures_eu_us_collection_as_uncensored(self):
-        self.assertIn(("EU_US_no_mosaic", "uncensored"), COLLECTIONS)
+        self.assertIn(
+            CollectionSpec("EU_US_no_mosaic", "uncensored"),
+            COLLECTIONS,
+        )
+
+    def test_configures_javbee_collection_fields(self):
+        self.assertIn(
+            CollectionSpec(
+                "javbee_items",
+                "regular",
+                number_field="code",
+                date_field="date",
+                normalized_number_field="code_normalized",
+            ),
+            COLLECTIONS,
+        )
 
     def test_generates_union_pipeline_and_dual_preferred_selection(self):
         collections = [
-            ("subtitle_collection", "subtitle"),
-            ("uncensored_collection", "uncensored"),
-            ("regular_collection", "regular"),
+            CollectionSpec("subtitle_collection", "subtitle"),
+            CollectionSpec("uncensored_collection", "uncensored"),
+            CollectionSpec("regular_collection", "regular"),
         ]
 
         query = generate_priority_query(["ABP-123"], collections)
@@ -36,8 +52,8 @@ class MultiCollectionQueryTests(unittest.TestCase):
             generate_priority_query(
                 ["ABP-123"],
                 [
-                    ("duplicate", "subtitle"),
-                    ("duplicate", "uncensored"),
+                    CollectionSpec("duplicate", "subtitle"),
+                    CollectionSpec("duplicate", "uncensored"),
                 ],
             )
 
@@ -45,8 +61,48 @@ class MultiCollectionQueryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不受支持"):
             generate_priority_query(
                 ["ABP-123"],
-                [("collection", "unknown")],
+                [CollectionSpec("collection", "unknown")],
             )
+
+    def test_generates_javbee_match_and_canonical_field_mapping(self):
+        query = generate_priority_query(
+            ["MIDV-086"],
+            [
+                CollectionSpec("forum", "regular"),
+                CollectionSpec(
+                    "javbee_items",
+                    "regular",
+                    number_field="code",
+                    date_field="date",
+                    normalized_number_field="code_normalized",
+                ),
+            ],
+        )
+
+        self.assertIn('"code_normalized": { $in: ["MIDV086"] }', query)
+        self.assertIn('"code": { $regex: "^MIDV[- ]?086"', query)
+        self.assertIn("{ $match: numberMatch2 }", query)
+        self.assertIn('number: { $ifNull: ["$code", "$code_normalized"] }', query)
+        self.assertIn('post_time: "$date"', query)
+        self.assertIn('source_collection: "javbee_items"', query)
+
+    def test_maps_fields_when_nonstandard_collection_is_first(self):
+        query = generate_priority_query(
+            ["MIDV-086"],
+            [
+                CollectionSpec(
+                    "javbee_items",
+                    "regular",
+                    number_field="code",
+                    date_field="date",
+                    normalized_number_field="code_normalized",
+                ),
+            ],
+        )
+
+        self.assertIn('db.getCollection("javbee_items")', query)
+        self.assertIn('number: { $ifNull: ["$code", "$code_normalized"] }', query)
+        self.assertIn('post_time: "$date"', query)
 
 
 if __name__ == "__main__":

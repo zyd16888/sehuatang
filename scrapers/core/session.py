@@ -1,5 +1,6 @@
 """每端口共享验证状态和限速，HTTP Session 由各常驻 worker 独立持有。"""
 import copy
+import socket
 import threading
 import time
 from urllib.parse import urlsplit
@@ -20,6 +21,7 @@ from scrapers.core.http import CrawlerHttpClient, redact_url
 from scrapers.core.models import FetchResult
 from util.log_util import log
 from .rate_limit import RateLimitSettings, RequestGate, SiteRateLimited
+from .network import NetworkMonitor, PROBE_TIMEOUT, CONTROL_URL, NETWORK_ERRORS, exception_info
 
 
 class SessionHttpClient:
@@ -39,6 +41,7 @@ class SessionHttpClient:
         self.settings = settings
         self.source = source
         self.log = log.bind(module=source)
+        self.network = NetworkMonitor(source, settings.proxy.url if settings.proxy.enabled else "", self.log)
         self.before_request = before_request
         self.gate = RequestGate(rate_settings or RateLimitSettings(
             settings.min_interval_seconds, settings.cooldown_seconds, settings.max_cooldown_seconds), logger=self.log)
@@ -77,6 +80,8 @@ class SessionHttpClient:
             replace(settings, retry=retry),
             request_func=self._request_with_cookies,
             sleeper=self._sleep,
+            attempt_observer=self.network.attempt,
+            request_timing=self._consume_request_timing,
         )
 
     # ---------- 引擎合同 ----------
@@ -173,6 +178,7 @@ class SessionHttpClient:
     # ---------- 内部 ----------
 
     def _request_with_cookies(self, url: str, **kwargs):
+        self._local.network_timing = None
         # 每次真实请求（包括 transport 内部重试）先检查会话和来源的间隔。
         headers = dict(kwargs.pop("headers", {}) or {})
         with self._solve_lock:
@@ -191,7 +197,11 @@ class SessionHttpClient:
             self._local.session = requests.Session()
         session = self._local.session
         session.cookies.clear()
-        response = session.get(url, cookies=cookies, headers=headers, **kwargs)
+        started = time.monotonic()
+        try:
+            response = session.get(url, cookies=cookies, headers=headers, **kwargs)
+        finally:
+            self._local.network_timing = (started, max(0, int((time.monotonic() - started) * 1000)))
         if (is_rate_limited(response.content)
                 or (response.status_code == 429 and not is_cf_challenge(response.content, 200))):
             self.gate.limit(CrawlerHttpClient._retry_after(response))
@@ -201,6 +211,52 @@ class SessionHttpClient:
                     self._jar.update(response.cookies)
                 self._cookie.update(response.cookies.get_dict())
         return response
+
+    def _consume_request_timing(self):
+        timing = getattr(self._local, "network_timing", None)
+        self._local.network_timing = None
+        return timing
+
+    def probe_network(self, url, revision):
+        """空闲 worker 原线路单次 GET；复用 Cookie/限速，不触发过盾或资源写入。"""
+        response = error = evidence = None
+        try:
+            response = self._request_with_cookies(
+                url, proxies=self._transport.proxies,
+                timeout=min(PROBE_TIMEOUT, self.settings.timeout),
+                allow_redirects=True, impersonate=self.settings.impersonate,
+            )
+        except SiteRateLimited:
+            pass
+        except Exception as exc:
+            error = exception_info(exc)
+            if error["error_type"] in NETWORK_ERRORS:
+                evidence = self._probe_control()
+        finally:
+            self._consume_request_timing()
+            self.network.finish_probe(url, revision, response, error, evidence)
+
+    def _probe_control(self):
+        """目标网络失败后补充证据；测试地址也必须使用原代理，禁止直连回退。"""
+        try:
+            if self.settings.proxy.enabled:
+                self.gate.acquire()
+                proxy = urlsplit(self.settings.proxy.url)
+                port = proxy.port or {"http": 80, "https": 443, "socks5": 1080, "socks5h": 1080}[proxy.scheme]
+                try:
+                    with socket.create_connection((proxy.hostname, port), timeout=3):
+                        pass
+                except OSError:
+                    return "proxy_unreachable"
+            result = self._request_with_cookies(
+                CONTROL_URL, proxies=self._transport.proxies, timeout=PROBE_TIMEOUT,
+                allow_redirects=False, impersonate=self.settings.impersonate,
+            )
+            return "target_path" if result.status_code == 204 else "undetermined"
+        except SiteRateLimited:
+            return "deferred"
+        except Exception:
+            return "undetermined"
 
     def validation_version(self):
         with self._cookie_lock:
