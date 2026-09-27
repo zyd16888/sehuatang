@@ -21,13 +21,15 @@ class HttpClient(SessionHttpClient):
         configured.load(str(get_config("sehuatang.cookie", "") or ""))
         self._initial_cookies = {name: item.value for name, item in configured.items()}
 
-    def _fetch_once(self, url, stage):
-        if self._initial_cookies:
-            with self._cookie_lock:
+    def _prepare_cookies(self, url):
+        with self._cookie_lock:
+            if self._initial_cookies:
                 self._merge_cookies([{"name": key, "value": value}
                                      for key, value in self._initial_cookies.items()], url)
                 self._cookie.update(self._initial_cookies)
                 self._initial_cookies.clear()
+
+    def _fetch_once(self, url, stage):
         version = self.validation_version()
         result = super()._fetch_once(url, stage)
         attempts, elapsed = result.attempts, result.elapsed_ms

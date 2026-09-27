@@ -30,6 +30,7 @@ def main():
         "tests.notification_tests",
         "tests.sehuatang_run_tests",
         "tests.network_monitor_tests",
+        "tests.proxy_failover_tests",
     ]
     try:
         suite = unittest.defaultTestLoader.loadTestsFromNames(names)

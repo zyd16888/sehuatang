@@ -62,6 +62,8 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual("suspect", self.row()["state"])
         self.assertIsNone(self.monitor.claim_probe())
         self.now += 5
+        self.assertIsNone(self.monitor.claim_probe())
+        self.now += 60
         claim = self.monitor.claim_probe()
         self.assertIsNotNone(claim)
         self.assertEqual("diagnosing", self.row()["state"])
@@ -83,7 +85,7 @@ class MonitorTests(unittest.TestCase):
         self.failures()
         self.record(started=old_start)
         self.assertEqual("suspect", self.row()["state"])
-        self.now += 5
+        self.now += 60
         claim = self.monitor.claim_probe()
         self.record(error=exception_info(TimeoutError()), status=None, body=None)
         self.monitor.finish_probe(*claim, result=response())
@@ -114,7 +116,7 @@ class MonitorTests(unittest.TestCase):
         self.failures()
         for _ in range(3):
             self.record(url="https://other.test/", error=exception_info(TimeoutError()), status=None, body=None)
-        self.now += 5
+        self.now += 60
         claim = self.monitor.claim_probe()
         self.monitor.finish_probe(*claim, result=response())
         self.assertIsNone(self.monitor.claim_probe())
@@ -157,10 +159,17 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual((kind, phase), (info["error_type"], info["phase"]))
             self.assertNotIn("password", json.dumps(info))
 
-    def test_no_active_probes_after_observation_window_expires(self):
+    def test_quarantined_lines_still_probe_after_observation_window_expires(self):
         self.failures()
         self.now += 301
-        self.assertIsNone(self.monitor.claim_probe())
+        self.assertEqual("stale", self.row()["state"])
+        self.assertIsNotNone(self.monitor.claim_probe())
+
+    def test_deferred_first_check_never_reports_a_healthy_line(self):
+        self.monitor.register_target(URL)
+        claim = self.monitor.claim_probe(URL)
+        self.monitor.finish_probe(*claim)
+        self.assertEqual("deferred", self.row()["diagnostic"]["outcome"])
         self.assertEqual("stale", self.row()["state"])
 
 
@@ -202,6 +211,7 @@ class NetworkIntegrationTests(unittest.TestCase):
         self.wait_idle(pool)
         monitor = pool.lanes[0].network
         monitor._domains["https://site.test"]["last_real"] -= 6
+        monitor._domains["https://site.test"]["blocked_until"] -= 61
         pool._dispatch_diagnostics()
         self.wait_idle(pool)
         self.assertEqual("recovered", monitor.snapshot()[0]["state"])
@@ -221,6 +231,7 @@ class NetworkIntegrationTests(unittest.TestCase):
         pool.fetch(URL)
         self.wait_idle(pool)
         pool.lanes[0].network._domains["https://site.test"]["last_real"] -= 6
+        pool.lanes[0].network._domains["https://site.test"]["blocked_until"] -= 61
         with pool._condition:
             pool._busy.add(0)
             pool._dispatch_diagnostics()
@@ -240,6 +251,7 @@ class NetworkIntegrationTests(unittest.TestCase):
         self.wait_idle(pool)
         monitor = pool.lanes[0].network
         monitor._domains["https://site.test"]["last_real"] -= 6
+        monitor._domains["https://site.test"]["blocked_until"] -= 61
         with patch("scrapers.core.session.socket.create_connection") as tcp:
             pool._dispatch_diagnostics()
             self.wait_idle(pool)
@@ -248,6 +260,8 @@ class NetworkIntegrationTests(unittest.TestCase):
         self.assertEqual(self.settings.proxy.url, get.call_args.kwargs["proxies"]["https"])
         row = monitor.snapshot()[0]
         self.assertEqual("target_path", row["diagnostic"]["evidence"])
+        self.assertEqual("ok", row["diagnostic"]["control"]["outcome"])
+        self.assertIsNotNone(row["diagnostic"]["elapsed_ms"])
         self.assertEqual("suspect", row["state"])
         self.assertEqual(3, row["attempts"])
         self.assertEqual(3, row["consecutive_failures"])
@@ -260,6 +274,7 @@ class NetworkIntegrationTests(unittest.TestCase):
         self.wait_idle(pool)
         monitor = pool.lanes[0].network
         monitor._domains["https://site.test"]["last_real"] -= 6
+        monitor._domains["https://site.test"]["blocked_until"] -= 61
         with patch("scrapers.core.session.socket.create_connection", side_effect=ConnectionRefusedError()):
             pool._dispatch_diagnostics()
             self.wait_idle(pool)

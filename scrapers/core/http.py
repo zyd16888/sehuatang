@@ -13,7 +13,7 @@ from util.log_util import log
 
 from .config import HttpSettings
 from .models import FetchResult
-from .network import exception_info, proxy_label
+from .network import NETWORK_ERRORS, exception_info, proxy_label
 
 
 _SENSITIVE_QUERY_KEYS = {
@@ -60,6 +60,8 @@ class CrawlerHttpClient:
         monotonic: Callable[[], float] = time.monotonic,
         attempt_observer=None,
         request_timing=None,
+        retry_context=None,
+        stop_on_network_error=False,
     ):
         settings.validate()
         self.source = source
@@ -71,6 +73,8 @@ class CrawlerHttpClient:
         self._monotonic = monotonic
         self._attempt_observer = attempt_observer
         self._request_timing = request_timing
+        self._retry_context = retry_context
+        self.stop_on_network_error = stop_on_network_error
 
     @property
     def proxies(self):
@@ -88,7 +92,8 @@ class CrawlerHttpClient:
         last_error_type = None
         last_error_message = None
 
-        for attempt in range(1, self.settings.retry.attempts + 1):
+        budget, retrying = self._retry_context() if self._retry_context else (self.settings.retry.attempts, False)
+        for attempt in range(1, budget + 1):
             retry_after = 0.0
             attempt_started = self._monotonic()
             last_status = last_body = last_error_type = last_error_message = None
@@ -141,9 +146,10 @@ class CrawlerHttpClient:
                 if timing and self._attempt_observer:
                     self._attempt_observer(url, started=timing[0], elapsed_ms=attempt_ms,
                                            status=last_status, body=last_body,
-                                           retry=attempt > 1, error=error)
+                                           retry=retrying or attempt > 1, error=error)
 
-            if not retryable or attempt >= self.settings.retry.attempts:
+            if (not retryable or attempt >= budget
+                    or (self.stop_on_network_error and last_error_type in NETWORK_ERRORS)):
                 if error:
                     self.log.warning(f"HTTP 请求最终失败: source={self.source} stage={stage} "
                                      f"proxy={proxy_label(self.settings.proxy.url if self.settings.proxy.enabled else '')} "

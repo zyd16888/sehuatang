@@ -82,11 +82,15 @@ class SessionHttpClient:
             sleeper=self._sleep,
             attempt_observer=self.network.attempt,
             request_timing=self._consume_request_timing,
+            retry_context=lambda: (getattr(self._local, "attempt_budget", settings.retry.attempts),
+                                   getattr(self._local, "retrying", False)),
         )
 
     # ---------- 引擎合同 ----------
 
-    def fetch(self, url: str, stage: str = "detail") -> FetchResult:
+    def fetch(self, url: str, stage: str = "detail", *, attempt_budget=None, retrying=False) -> FetchResult:
+        self._local.attempt_budget = attempt_budget or self.settings.retry.attempts
+        self._local.retrying = retrying
         try:
             self.gate.check()
             result = self._fetch_once(url, stage)
@@ -177,7 +181,11 @@ class SessionHttpClient:
 
     # ---------- 内部 ----------
 
+    def _prepare_cookies(self, url):
+        """来源插件可在首次请求或检测前应用配置 Cookie。"""
+
     def _request_with_cookies(self, url: str, **kwargs):
+        self._prepare_cookies(url)
         self._local.network_timing = None
         # 每次真实请求（包括 transport 内部重试）先检查会话和来源的间隔。
         headers = dict(kwargs.pop("headers", {}) or {})
@@ -217,27 +225,42 @@ class SessionHttpClient:
         self._local.network_timing = None
         return timing
 
-    def probe_network(self, url, revision):
+    def probe_network(self, url, revision, *, check_control=False):
         """空闲 worker 原线路单次 GET；复用 Cookie/限速，不触发过盾或资源写入。"""
-        response = error = evidence = None
+        response = error = evidence = control = None
+        elapsed_ms = None
         try:
+            self._prepare_cookies(url)
+            if check_control:
+                control = self._check_control()
             response = self._request_with_cookies(
                 url, proxies=self._transport.proxies,
                 timeout=min(PROBE_TIMEOUT, self.settings.timeout),
                 allow_redirects=True, impersonate=self.settings.impersonate,
             )
+            if getattr(self, "_is_r18_block", lambda body: False)(response.content):
+                error = dict(error_type="r18_challenge", curl_code=None, phase="response", summary="目标站返回 R18 验证页面")
         except SiteRateLimited:
             pass
         except Exception as exc:
             error = exception_info(exc)
             if error["error_type"] in NETWORK_ERRORS:
-                evidence = self._probe_control()
+                timing = self._consume_request_timing()
+                if timing:
+                    elapsed_ms = timing[1]
+                control = control or self._check_control()
+                evidence = ("target_path" if control["outcome"] == "ok" else
+                            "proxy_unreachable" if control.get("evidence") == "proxy_unreachable" else "undetermined")
         finally:
-            self._consume_request_timing()
-            self.network.finish_probe(url, revision, response, error, evidence)
+            timing = self._consume_request_timing()
+            if timing:
+                elapsed_ms = timing[1]
+            self.network.finish_probe(url, revision, response, error, evidence, control, elapsed_ms)
 
-    def _probe_control(self):
-        """目标网络失败后补充证据；测试地址也必须使用原代理，禁止直连回退。"""
+    def _check_control(self):
+        """经原代理访问测试地址，返回独立于目标站的诊断结果。"""
+        started = time.monotonic()
+        result = dict(outcome="response_error", status=None, error=None)
         try:
             if self.settings.proxy.enabled:
                 self.gate.acquire()
@@ -247,16 +270,24 @@ class SessionHttpClient:
                     with socket.create_connection((proxy.hostname, port), timeout=3):
                         pass
                 except OSError:
-                    return "proxy_unreachable"
-            result = self._request_with_cookies(
+                    result.update(outcome="network_error", evidence="proxy_unreachable")
+                    return result
+            response = self._request_with_cookies(
                 CONTROL_URL, proxies=self._transport.proxies, timeout=PROBE_TIMEOUT,
                 allow_redirects=False, impersonate=self.settings.impersonate,
             )
-            return "target_path" if result.status_code == 204 else "undetermined"
+            from .network import response_outcome
+            result.update(status=response.status_code, outcome="ok" if response.status_code == 204 else
+                          response_outcome(response.status_code, response.content))
         except SiteRateLimited:
-            return "deferred"
-        except Exception:
-            return "undetermined"
+            result.update(outcome="deferred", evidence="deferred")
+        except Exception as exc:
+            error = exception_info(exc)
+            result.update(outcome="network_error" if error["error_type"] in NETWORK_ERRORS else "response_error", error=error)
+        finally:
+            result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            self._consume_request_timing()
+        return result
 
     def validation_version(self):
         with self._cookie_lock:

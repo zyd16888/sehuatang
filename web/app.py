@@ -210,8 +210,17 @@ def create_app(
 
     @app.get("/api/network", dependencies=[Depends(require_auth)])
     def network_status():
-        from scrapers.core.pool import network_snapshot
-        return network_snapshot()
+        from scrapers.core.network_management import configured_snapshot
+        return configured_snapshot(get_config() or {})
+
+    @app.post("/api/network/check", dependencies=[Depends(require_auth)])
+    def network_check(payload: dict):
+        from scrapers.core.network_management import check_configured_network
+        try:
+            return check_configured_network(get_config() or {}, payload.get("source") or None,
+                                            payload.get("proxy_slot"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     @app.get("/api/notifications", dependencies=[Depends(require_auth)])
     def notification_status():

@@ -9,7 +9,7 @@ const esc = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt
 const base = {source: "x1080x", proxy: "http://proxy.test:17891", target: "https://site.test", state: "healthy", attempts: 2, retries: 1, failed: 0, completed: 1, timeout_rate: .5, average_ms: 500, last_success: 1000};
 
 function page(api) {
-  const elements = {networkSource: {value: ""}, networkNote: {}, networkLines: {innerHTML: ""}};
+  const elements = {networkSource: {value: ""}, checkNetwork: {}, networkNote: {}, networkLines: {innerHTML: ""}};
   const context = {panelRequest: 0, $: id => elements[id], esc, api, fmtTime: value => value.toISOString()};
   return {elements, context, refresh: script.runInNewContext(context)};
 }
@@ -65,4 +65,35 @@ test("late refresh cannot overwrite a newer source selection", async () => {
 
 test("entire inline script parses after network tab integration", () => {
   new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
+
+test("independent checks show both results and quarantine without crawl traffic", async () => {
+  const ui = page(async () => ({lines: [{...base, proxy_slot: 0, attempts: 0, completed: 0,
+    quarantined: true, recovery_in: 60, state: "unstable", diagnostic: {
+      at: 1000, outcome: "network_error", elapsed_ms: 100,
+      control: {outcome: "ok", elapsed_ms: 80}}}]}));
+  await ui.refresh();
+  const text = ui.elements.networkLines.innerHTML;
+  assert.match(text, /目标站：/);
+  assert.match(text, /测试地址：可达/);
+  assert.match(text, /已暂停分配/);
+  assert.match(text, /data-network-slot="0"/);
+  assert.match(text, /检测此线路/);
+});
+
+test("check button posts only source and slot to independent check endpoint", async () => {
+  const calls = [];
+  const ui = page(async (path, options) => {
+    calls.push([path, options]);
+    return options ? {queued: 1} : {lines: [base]};
+  });
+  ui.context.toast = () => {};
+  ui.context.report = error => {throw error;};
+  const button = {disabled: false};
+  await ui.context.checkNetwork(button, "x1080x", 1);
+  assert.equal(calls[0][0], "/api/network/check");
+  assert.equal(calls[0][1].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0][1].body), {source: "x1080x", proxy_slot: 1});
+  assert.equal(calls[1][0], "/api/network");
+  assert.equal(button.disabled, false);
 });

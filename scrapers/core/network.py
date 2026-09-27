@@ -1,4 +1,4 @@
-"""线路请求观测。仅保留当前进程的有界统计，不参与重试或线路选择。"""
+"""线路请求观测与按目标站隔离的网络故障状态。"""
 import threading
 import time
 from collections import OrderedDict, deque
@@ -58,6 +58,8 @@ def response_outcome(status, body, error_type=None):
         return "network_error"
     if status == 407:
         return "proxy_auth"
+    if error_type in ("cf_challenge", "r18_challenge"):
+        return "challenge"
     if is_cf_challenge(body, status):
         return "challenge"
     if status in (403, 429) or is_rate_limited(body):
@@ -89,6 +91,7 @@ class NetworkMonitor:
                 last_success_start=-float("inf"),
                 probing=False, probe_url=None, diagnostic=None, outcome=None,
                 recovered_at=None, last_error=None, revision=0,
+                quarantined=False, blocked_until=0,
             )
         self._domains.move_to_end(key)
         return self._domains[key]
@@ -114,6 +117,8 @@ class NetworkMonitor:
             row["last_failure_start"] = max(started, row["last_failure_start"])
             row["consecutive"] += int(real)
             row["last_error"] = error
+            row["quarantined"] = True
+            row["blocked_until"] = self._now() + PROBE_INTERVAL
             if row["consecutive"] >= FAILURE_THRESHOLD and not row["alert"]:
                 row["alert"] = True
                 self.log.warning(f"线路疑似异常: source={self.source} proxy={self.proxy} "
@@ -122,6 +127,8 @@ class NetworkMonitor:
             row["last_success_start"] = max(started, row["last_success_start"])
             row["consecutive"] = 0
             row["last_error"] = None
+            row["quarantined"] = False
+            row["blocked_until"] = 0
             if row["alert"]:
                 if outcome == "ok":
                     row["recovered_at"] = self._now()
@@ -159,23 +166,40 @@ class NetworkMonitor:
             elif started is not None and error_type in ("cf_challenge", "r18_challenge", "rate_limited"):
                 self._outcome(row, "restricted" if error_type == "rate_limited" else "challenge", started, None)
 
-    def claim_probe(self):
+    def available(self, url):
+        with self._lock:
+            row = self._domains.get(origin(url))
+            return row is None or not row["quarantined"]
+
+    def register_target(self, url):
+        with self._lock:
+            self._entry(url)
+
+    def claim_probe(self, url=None):
         with self._lock:
             now = self._now()
-            if now - self._last_probe < PROBE_INTERVAL or any(r["probing"] for r in self._domains.values()):
+            if any(r["probing"] for r in self._domains.values()):
+                return None
+            if url is not None:
+                row = self._entry(url)
+                row["probe_url"] = url
+                row["probing"] = True
+                row["last_probe"] = self._last_probe = now
+                return url, row["revision"]
+            if now - self._last_probe < PROBE_INTERVAL:
                 return None
             for row in self._domains.values():
-                if (row["alert"] and not row["probing"]
+                recovery_due = row["quarantined"] and now >= row["blocked_until"]
+                if (recovery_due and not row["probing"]
                         and now - row["last_real"] >= PROBE_IDLE_SECONDS
-                        and now - row["last_probe"] >= PROBE_INTERVAL
-                        and now - row["last_real"] < WINDOW_SECONDS):
+                        and now - row["last_probe"] >= PROBE_INTERVAL):
                     row["probing"] = True
                     row["last_probe"] = now
                     self._last_probe = now
                     return row["probe_url"], row["revision"]
         return None
 
-    def finish_probe(self, url, revision, result=None, error=None, evidence=None):
+    def finish_probe(self, url, revision, result=None, error=None, evidence=None, control=None, elapsed_ms=None):
         with self._lock:
             row = self._domains.get(origin(url))
             if row is None:
@@ -183,11 +207,11 @@ class NetworkMonitor:
             row["probing"] = False
             if revision != row["revision"]:
                 return
-            outcome = response_outcome(result.status_code, result.content) if result is not None else (
+            outcome = response_outcome(result.status_code, result.content, error["error_type"] if error else None) if result is not None else (
                 response_outcome(None, None, error["error_type"]) if error else "deferred")
             row["diagnostic"] = dict(at=self._wall(), outcome=outcome, error=error,
                                      status=result.status_code if result is not None else None,
-                                     evidence=evidence)
+                                     evidence=evidence, control=control, elapsed_ms=elapsed_ms)
             if outcome != "deferred":
                 self._outcome(row, outcome, row["last_probe"], error, real=False)
 
@@ -199,11 +223,14 @@ class NetworkMonitor:
                 self._bucket(row)
                 total = {key: sum(b[key] for b in row["buckets"]) for key in
                          ("attempts", "retries", "timeouts", "elapsed_ms", "completed", "failed")}
+                latest_evidence = row["last_real"]
+                if row["diagnostic"] and row["diagnostic"]["outcome"] != "deferred":
+                    latest_evidence = max(latest_evidence, row["last_probe"])
                 state = "healthy"
-                if now - row["last_real"] >= WINDOW_SECONDS:
-                    state = "stale"
-                elif row["probing"]:
+                if row["probing"]:
                     state = "diagnosing"
+                elif now - latest_evidence >= WINDOW_SECONDS:
+                    state = "stale"
                 elif row["outcome"] in ("restricted", "challenge", "proxy_auth", "response_error"):
                     state = row["outcome"]
                 elif row["alert"]:
@@ -217,5 +244,6 @@ class NetworkMonitor:
                                  average_ms=round(total["elapsed_ms"] / total["attempts"]) if total["attempts"] else None,
                                  consecutive_failures=row["consecutive"], last_attempt=row["last_attempt"],
                                  last_success=row["last_success"], last_error=row["last_error"],
-                                 diagnostic=row["diagnostic"]))
+                                 diagnostic=row["diagnostic"], quarantined=row["quarantined"],
+                                 recovery_in=max(0, round(row["blocked_until"] - now))))
             return rows

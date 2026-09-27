@@ -939,7 +939,7 @@
           <div class="toolbar">
             <div>
               <h2>线路监测</h2>
-              <p class="hint">最近 5 分钟的实际请求；异常线路空闲后自动诊断。</p>
+              <p class="hint">可直接检测代理与目标站；网络失败线路暂时隔离，恢复后继续调度。</p>
             </div>
             <select id="networkSource" aria-label="线路监测来源">
               <option value="">全部来源</option>
@@ -947,6 +947,7 @@
               <option value="javbee">javbee</option>
               <option value="x1080x">x1080x</option>
             </select>
+            <button id="checkNetwork" class="primary">检测全部</button>
           </div>
           <p class="hint" id="networkNote" role="status" aria-live="polite">正在读取线路状态…</p>
           <div id="networkLines" class="network-grid"></div>
@@ -1436,6 +1437,7 @@
         }
         if (seq !== panelRequest) return;
         const rows = (data.lines || []).filter(row => !$("networkSource").value || row.source === $("networkSource").value);
+        $("checkNetwork").textContent = $("networkSource").value ? "检测当前来源" : "检测全部";
         const states = {
           healthy: ["正常", "ok"], unstable: ["偶发网络异常", "due"],
           suspect: ["疑似异常", "failed"], diagnosing: ["诊断中", "running"],
@@ -1446,17 +1448,35 @@
         const outcomes = {ok: "原线路已能访问目标页面", network_error: "原线路访问目标仍有网络异常", deferred: "诊断暂缓，等待站点冷却", restricted: "目标站返回访问限制", challenge: "目标站返回验证页面", proxy_auth: "代理认证失败", response_error: "目标站返回异常响应"};
         const evidence = {proxy_unreachable: "爬虫无法连接代理端口，请检查代理服务或容器网络。", target_path: "同线路测试地址可达，异常集中在目标站访问路径。", undetermined: "测试地址也未验证成功，暂无法区分线路与目标站故障。", deferred: "补充诊断暂缓，等待站点冷却。"};
         const stamp = value => value == null ? "—" : fmtTime(new Date(value * 1000));
-        $("networkNote").textContent = rows.length ? `共 ${rows.length} 条线路记录 · 同一端口访问不同站点分别统计` : "暂无线路记录，开始采集后会自动显示；尚未发起请求不代表线路正常。";
+        $("networkNote").textContent = rows.length ? `共 ${rows.length} 条线路记录 · 可在采集前独立检测 · 同一端口访问不同站点分别统计` : "暂无已配置线路；尚未发起请求不代表线路正常。";
         $("networkLines").innerHTML = rows.map(row => {
           const [label, tone] = states[row.state] || ["状态未知", ""];
           const diagnosis = row.diagnostic;
+          const check = value => `${esc(outcomes[value.outcome] || "未确认")}${value.status ? ` · HTTP ${Number(value.status)}` : ""}${value.elapsed_ms != null ? ` · ${(value.elapsed_ms / 1000).toFixed(2)}s` : ""}${value.error ? `<br>${esc(value.error.summary)}` : ""}`;
           return `<article class="network-card"><div class="network-top"><h3>${esc(row.source)}</h3><span class="badge ${tone}">${label}</span></div>
             <div class="network-address">${esc(row.proxy === "direct" ? "直连" : row.proxy)}<br><span class="hint">${esc(row.target || "等待首次请求")}</span></div>
             <dl class="network-stats"><div><dt>请求 / 重试</dt><dd>${Number(row.attempts || 0)} / ${Number(row.retries || 0)}</dd></div><div><dt>超时率</dt><dd>${row.timeout_rate == null ? "—" : (row.timeout_rate * 100).toFixed(1) + "%"}</dd></div><div><dt>平均耗时</dt><dd>${row.average_ms == null ? "—" : (row.average_ms / 1000).toFixed(2) + "s"}</dd></div></dl>
             <div class="network-detail hint">最终失败 ${Number(row.failed || 0)} / 已完成 ${Number(row.completed || 0)} · 连续网络失败 ${Number(row.consecutive_failures || 0)}<br>最后成功 ${stamp(row.last_success)}<br>最后请求 ${stamp(row.last_attempt)}
             ${row.last_error ? `<p>${esc(row.last_error.summary)}<br>curl ${esc(row.last_error.curl_code ?? "—")} · ${esc(row.last_error.phase)}</p>` : ""}
-            ${diagnosis ? `<p>最近诊断 ${stamp(diagnosis.at)}<br>${esc(outcomes[diagnosis.outcome] || "证据不足")}${diagnosis.status ? ` · HTTP ${Number(diagnosis.status)}` : ""}${diagnosis.evidence ? `<br>${esc(evidence[diagnosis.evidence] || "证据不足")}` : ""}</p>` : ""}</div></article>`;
+            ${row.quarantined ? `<p>该线路访问此目标已暂停分配 · ${row.recovery_in > 0 ? `约 ${Number(row.recovery_in)} 秒后检测恢复` : "等待检测恢复"}</p>` : ""}
+            ${diagnosis ? `<p>最近检测 ${stamp(diagnosis.at)}<br>目标站：${check(diagnosis)}${diagnosis.control ? `<br>测试地址：${diagnosis.control.outcome === "ok" ? "可达" : check(diagnosis.control)}${diagnosis.control.outcome === "ok" ? ` · ${(diagnosis.control.elapsed_ms / 1000).toFixed(2)}s` : ""}` : ""}${diagnosis.evidence ? `<br>${esc(evidence[diagnosis.evidence] || "证据不足")}` : ""}</p>` : ""}</div>
+            <button data-network-source="${esc(row.source)}" data-network-slot="${Number(row.proxy_slot)}" ${row.state === "diagnosing" ? "disabled" : ""}>${row.state === "diagnosing" ? "检测中" : "检测此线路"}</button></article>`;
         }).join("");
+      }
+      async function checkNetwork(button, source, proxySlot) {
+        if (button.disabled) return;
+        button.disabled = true;
+        try {
+          const payload = {source: source || null};
+          if (proxySlot !== undefined) payload.proxy_slot = proxySlot;
+          const result = await api("/api/network/check", {method: "POST", body: JSON.stringify(payload)});
+          toast(result.queued ? `已提交 ${result.queued} 条线路检测` : "线路正在检测，请稍后查看结果");
+          await refreshNetwork();
+        } catch (error) {
+          report(error);
+        } finally {
+          button.disabled = false;
+        }
       }
       async function refreshRuns() {
         const seq = ++panelRequest;
@@ -1639,6 +1659,11 @@
           { source: b.dataset.source, dry_run: b.dataset.action === "dry" },
           retry ? "已提交到期失败重试任务" : "已提交采集任务",
         );
+      });
+      $("checkNetwork").onclick = () => checkNetwork($("checkNetwork"), $("networkSource").value);
+      $("networkLines").addEventListener("click", event => {
+        const button = event.target.closest("[data-network-source]");
+        if (button) checkNetwork(button, button.dataset.networkSource, Number(button.dataset.networkSlot));
       });
       $("failuresBody").addEventListener("click", (event) => {
         const b = event.target.closest(".requeue");
